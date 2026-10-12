@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>{{ page_title|default('Aviator / Live Signal') }}</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/responsive.css">
+  <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+</head>
+<body class="aviator-body">
+  <header class="aviator-header">
+    <div>
+      <span class="eyebrow">POWER MODE / AVIATOR</span>
+      <h1>Aviator <span id="symbol">{{ symbol }}</span></h1>
+    </div>
+    <div class="header-tools">
+      <div class="mode-switch" aria-label="Application mode selector">
+        <button class="mode-btn {% if app_mode != 'aviator' %}active{% endif %}" data-mode="step_index" type="button">Deriv</button>
+        <button class="mode-btn {% if app_mode == 'aviator' %}active{% endif %}" data-mode="aviator" type="button">Aviator</button>
+      </div>
+      <div id="connection" class="connection offline">● OFFLINE</div>
+    </div>
+  </header>
+
+  <main class="aviator-main">
+    <section class="aviator-grid">
+      <article class="aviator-card signal-card">
+        <div class="panel-heading">
+          <span class="label">CURRENT SIGNAL</span>
+          <span id="trade-status" class="badge">WAITING</span>
+        </div>
+        <div id="signal" class="signal">NO AVIATOR SIGNAL</div>
+        <div id="score" class="muted">No confidence score</div>
+        <p id="reason" class="reason">Connect a live Aviator source or wait for the next signal.</p>
+      </article>
+
+      <article class="aviator-card pack-card">
+        <span class="label">TRADE PLAN</span>
+        <div class="trade-grid compact-grid">
+          <b>ENTRY</b><strong id="entry">--</strong>
+          <b>STOP</b><strong id="sl">--</strong>
+          <b>TP1</b><strong id="tp1">--</strong>
+          <b>TP2</b><strong id="tp2">--</strong>
+          <b>R:R</b><strong id="rr">--</strong>
+        </div>
+      </article>
+    </section>
+
+    <section class="aviator-lower-grid">
+      <article class="aviator-card mini-card">
+        <span class="label">LIVE PRICE</span>
+        <div id="price" class="price small-price">--</div>
+        <div id="tick-time" class="muted">Waiting for a verified tick</div>
+      </article>
+
+      <article class="aviator-card mini-card">
+        <span class="label">MODE</span>
+        <div class="mode-readout">AVIATOR POWER MODE</div>
+        <div class="muted">Separate from Deriv Step Index, no duplication of the live dashboard.</div>
+      </article>
+    </section>
+  </main>
+</body>
+</html>
