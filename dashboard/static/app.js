@@ -38,6 +38,7 @@ function mainSignalLabel(signal) {
   if (signal.status === 'ENTRY CONFIRMED') return `${signal.direction} · ENTRY RULES PASSED`;
   if (signal.status === 'WAIT — TIMEFRAMES NOT ALIGNED') return 'WAIT · TIMEFRAMES NOT ALIGNED';
   if (signal.status === 'WAIT — ENTRY CONDITIONS NOT MET') return 'WAIT · ENTRY CONDITIONS NOT MET';
+  if (signal.status === 'WAIT — TRADINGVIEW CONFIRMATION REQUIRED') return 'WAIT · MATCHING TRADINGVIEW ALERT NEEDED';
   if (signal.status === 'WAIT — PRICE MOVED') return 'WAIT · PRICE MOVED';
   if (signal.status === 'WAIT — ENTRY WINDOW EXPIRED') return 'WAIT · ENTRY WINDOW EXPIRED';
   if (signal.status === 'WAIT — LIVE PRICE UNAVAILABLE') return 'WAIT · LIVE PRICE NEEDED';
@@ -87,11 +88,10 @@ let audioContext = null;
 let soundReady = false;
 let pendingAudioAlerts = [];
 let previousMainSignal = '';
-let previousScalpSignal = '';
 let activeExitAlertId = '';
 let dismissedExitAlertId = '';
 try { dismissedExitAlertId = sessionStorage.getItem('dismissedExitAlertId') || ''; } catch (error) {}
-const confirmedStatuses = new Set(['ENTRY CONFIRMED', 'SCALP ENTRY CONFIRMED']);
+const confirmedStatuses = new Set(['ENTRY CONFIRMED']);
 
 function tone(frequency, duration, delay = 0) {
   if (!soundReady) return;
@@ -220,13 +220,10 @@ function paint(data) {
   $('tick-time').textContent = data.last_tick ? new Date(data.last_tick * 1000).toLocaleString() : 'Waiting for a verified tick';
   const signal = data.signal || {};
   const swingVolume = signal.swing_volume_confirmation || {};
-  const scalp = data.scalp_signal || {};
   const bot = data.bot || {};
   if (signal.status === 'ENTRY CONFIRMED' && previousMainSignal !== signal.id) entryAlert();
-  if (scalp.status === 'SCALP ENTRY CONFIRMED' && previousScalpSignal !== scalp.id) entryAlert();
   showExitAlert(data.exit_alert);
   previousMainSignal = signal.id || '';
-  previousScalpSignal = scalp.id || '';
   $('signal').textContent = mainSignalLabel(signal);
   $('score').textContent = signal.score ? `${signal.score}/100 rule points · not win odds` : 'No entry has passed every check';
   const signalReasons = (signal.reasons || []).map(plainReason);
@@ -259,40 +256,8 @@ function paint(data) {
     return `<div class="indicator-row"><span><b>${label}</b><small>${explanation}</small></span><strong>${fmt(value)}</strong></div>`;
   }).join('') || 'Waiting for enough closed candles.';
   renderHistory(data.history);
-  $('scalp-status').textContent = scalp.status || 'NO SCALP SIGNAL';
-  $('scalp-score').textContent = scalp.score ? `${scalp.score}/100 rule points · not win odds` : '--';
-  $('scalp-direction').textContent = scalp.direction || (scalp.watch_direction ? `WAITING TO ${scalp.watch_direction}` : '--');
-  $('scalp-entry').textContent = fmt(scalp.entry);
-  $('scalp-sl').textContent = fmt(scalp.stop_loss);
-  $('scalp-tp1').textContent = fmt(scalp.tp1);
-  $('scalp-tp2').textContent = fmt(scalp.tp2);
-  const timeframeConflict = scalp.status === 'SCALP WAIT — TIMEFRAMES NOT ALIGNED';
-  const scalpHint = timeframeConflict ? '' : directionalHint(scalp.direction || scalp.watch_direction, 'scalp');
-  const scalpExplanation = scalp.watch_direction === 'BUY'
-    ? 'Simple version: wait for price to dip, then turn upward on a finished 1-minute candle.'
-    : scalp.watch_direction === 'SELL'
-      ? 'Simple version: wait for price to rise, then turn downward on a finished 1-minute candle.'
-      : '';
-  $('scalp-reason').textContent = [scalpHint, scalpExplanation, ...(scalp.reasons || []).map(plainReason)].filter(Boolean).join(' ')
-    || 'Waiting for fresh live 1M and 5M candles before describing a BUY or SELL trigger.';
-  const scenarioGrid = $('scalp-scenarios');
-  if (scenarioGrid) scenarioGrid.hidden = timeframeConflict;
-  const scenarios = scalp.scenarios || {};
-  for (const direction of ['BUY', 'SELL']) {
-    const scenario = scenarios[direction] || {};
-    const status = $(`scalp-${direction.toLowerCase()}-status`);
-    const reasons = $(`scalp-${direction.toLowerCase()}-reasons`);
-    if (status) status.textContent = scenario.status || 'WAITING FOR LIVE CANDLES';
-    if (reasons) reasons.textContent = (scenario.reasons || ['Waiting for live candle data.']).map(plainReason).join(' ');
-  }
-  const scalpValues = data.scalp_trade_values || {};
-  $('scalp-lot-size').textContent = `${Number(scalpValues.lot_size ?? .1).toFixed(2)} LOT`;
-  $('scalp-loss-usd').textContent = usdValue(scalpValues, 'estimated_loss_usd', 'risk_price_units');
-  $('scalp-tp1-usd').textContent = usdValue(scalpValues, 'estimated_target_1_usd', 'target_1_price_units');
-  $('scalp-tp2-usd').textContent = usdValue(scalpValues, 'estimated_target_2_usd', 'target_2_price_units');
-  const scalpProfitFactor = bot.scalp_backtest_profit_factor == null ? '--' : Number(bot.scalp_backtest_profit_factor).toFixed(2);
-  const scalpHoldoutFactor = bot.scalp_backtest_validation_profit_factor == null ? '--' : Number(bot.scalp_backtest_validation_profit_factor).toFixed(2);
-  $('scalp-validation').textContent = `Past test: ${plainBacktest(bot.scalp_backtest_status)} · ${bot.scalp_backtest_trades ?? 0} total trades · recent check ${bot.scalp_backtest_validation_trades ?? 0} trades / ratio ${scalpHoldoutFactor}`;
+  $('scalp-status').textContent = 'DISABLED';
+  $('scalp-reason').textContent = 'Rapid scalp entries are disabled. Wait for the validated multi-timeframe main signal; no BUY or SELL scalp alerts will be issued.';
   const today = data.today_trend || {};
   $('today-direction').textContent = today.direction || 'WAITING';
   $('today-change').textContent = today.change_percent == null ? '--' : `${Number(today.change_percent).toFixed(2)}%`;
@@ -303,6 +268,7 @@ function paint(data) {
   $('bot-mode').textContent = bot.mode === 'ALERT_ONLY' ? 'SIGNALS ONLY' : (bot.mode || 'SIGNALS ONLY');
   $('bot-feed').textContent = bot.feed_quality || 'STALE';
   $('bot-age').textContent = bot.feed_age_seconds == null ? '--' : `${bot.feed_age_seconds}s`;
+  $('bot-tradingview').textContent = bot.tradingview_confirmation || 'NOT CONFIGURED';
   $('bot-backtest').textContent = plainBacktest(bot.backtest_status);
   const profitFactor = bot.backtest_profit_factor == null ? '--' : Number(bot.backtest_profit_factor).toFixed(2);
   $('bot-backtest-sample').textContent = `${bot.backtest_trades ?? 0} past trades · gain/loss ratio ${profitFactor}`;
@@ -316,7 +282,7 @@ function paint(data) {
     card.querySelector('.analysis-bias').textContent = plainDirection(item.bias);
     const action = card.querySelector('.analysis-action');
     const confluence = item.confluence || {};
-    action.textContent = item.action === 'BUY' ? `BUY · ${confluence.bullish_votes ?? 0}/5 AGREE` : item.action === 'SELL' ? `SELL · ${confluence.bearish_votes ?? 0}/5 AGREE` : `WAIT · ${Math.max(confluence.bullish_votes ?? 0, confluence.bearish_votes ?? 0)}/5`; 
+    action.textContent = item.action === 'BUY' ? `UP BIAS · ${confluence.bullish_votes ?? 0}/5 AGREE` : item.action === 'SELL' ? `DOWN BIAS · ${confluence.bearish_votes ?? 0}/5 AGREE` : `WAIT · ${Math.max(confluence.bullish_votes ?? 0, confluence.bearish_votes ?? 0)}/5`;
     action.style.color = item.action === 'BUY' ? '#75e6a2' : item.action === 'SELL' ? '#ff6b6b' : '#f6c85f';
     card.querySelector('.analysis-ema').textContent = confluence.layers?.trend || (item.ema_alignment === 'BULLISH' ? 'BULLISH' : item.ema_alignment === 'BEARISH' ? 'BEARISH' : 'NEUTRAL');
     card.querySelector('.analysis-rsi').textContent = item.rsi == null ? '--' : `${Math.round(item.rsi)} / 100`;
@@ -494,7 +460,7 @@ function renderHistory(history) {
     heading.append(identity, time);
     const type = document.createElement('span');
     type.className = 'confirmed-signal-type';
-    type.textContent = item.outcome === 'SCALP ENTRY CONFIRMED' ? 'SCALP SIGNAL CONFIRMED' : 'MAIN SIGNAL CONFIRMED';
+    type.textContent = 'MAIN SIGNAL CONFIRMED';
     card.append(heading, type);
 
     const levels = document.createElement('div');
@@ -552,7 +518,7 @@ function addTodayTrend() {
 function addScalpPanel() {
   const panel = document.createElement('article');
   panel.className = 'scalp-card';
-  panel.innerHTML = '<div class="panel-heading"><span class="label">QUICK TRADE · 1-MINUTE TRIGGER / 5-MINUTE SETUP</span><span id="scalp-status" class="trend-direction">WAITING</span></div><div id="scalp-validation" class="validation-line">Past test: WAITING FOR DATA</div><div class="scalp-head"><strong id="scalp-direction">--</strong><span id="scalp-score" class="muted">--</span></div><div class="scalp-levels"><span>ENTRY <b id="scalp-entry">--</b></span><span>STOP · EXIT IF WRONG <b id="scalp-sl">--</b></span><span>TARGET 1 <b id="scalp-tp1">--</b></span><span>TARGET 2 <b id="scalp-tp2">--</b></span></div><div class="scalp-money-grid"><span>SIZE <b id="scalp-lot-size">0.10 LOT</b></span><span>EST. LOSS AT STOP <b id="scalp-loss-usd">--</b></span><span>POSSIBLE AT TARGET 1 <b id="scalp-tp1-usd">--</b></span><span>POSSIBLE AT TARGET 2 <b id="scalp-tp2-usd">--</b></span></div><p id="scalp-reason" class="reason">Waiting for fresh 1-minute and 5-minute candles.</p><div id="scalp-scenarios" class="scenario-grid" aria-label="Conditional BUY and SELL scalp setups"><article class="scenario-card buy"><div><strong>BUY SCENARIO</strong><b id="scalp-buy-status">WAITING FOR LIVE CANDLES</b></div><p id="scalp-buy-reasons">Waiting for live candle data.</p></article><article class="scenario-card sell"><div><strong>SELL SCENARIO</strong><b id="scalp-sell-status">WAITING FOR LIVE CANDLES</b></div><p id="scalp-sell-reasons">Waiting for live candle data.</p></article></div><small class="scenario-note">These are conditional setups, not simultaneous entry instructions. Only the main signal marked ENTRY CONFIRMED has passed validation.</small>';
+  panel.innerHTML = '<div class="panel-heading"><span class="label">QUICK TRADING</span><span id="scalp-status" class="trend-direction">DISABLED</span></div><p id="scalp-reason" class="reason">Rapid scalp entries are disabled. Wait for the validated multi-timeframe main signal; no BUY or SELL scalp alerts will be issued.</p>';
   const signalPanel = document.querySelector('.signal-panel');
   signalPanel.parentElement.appendChild(panel);
 }
@@ -560,7 +526,7 @@ function addScalpPanel() {
 function addBotPanel() {
   const panel = document.createElement('article');
   panel.className = 'bot-card';
-  panel.innerHTML = '<div class="panel-heading"><span class="label">DATA CHECK</span><span class="trend-direction">NO AUTO-ORDERS</span></div><div class="bot-grid"><div><span>MODE</span><b id="bot-mode">ALERT_ONLY</b></div><div><span>PRICE FEED</span><b id="bot-feed">STALE</b></div><div><span>TICK AGE</span><b id="bot-age">--</b></div><div><span>MAIN PAST TEST</span><b id="bot-backtest">WAITING FOR DATA</b></div><div><span>ALL PAST TRADES</span><b id="bot-backtest-sample">0 trades</b></div><div><span>RECENT HOLDOUT CHECK</span><b id="bot-backtest-holdout">0 trades</b></div></div><div class="sound-row"><span id="sound-state">Audio alerts start automatically when the browser permits playback.</span></div><small>The app never opens orders. A signal can still lose; check the stop amount first.</small>';
+  panel.innerHTML = '<div class="panel-heading"><span class="label">DATA CHECK</span><span class="trend-direction">NO AUTO-ORDERS</span></div><div class="bot-grid"><div><span>MODE</span><b id="bot-mode">ALERT_ONLY</b></div><div><span>PRICE FEED</span><b id="bot-feed">STALE</b></div><div><span>TICK AGE</span><b id="bot-age">--</b></div><div><span>TRADINGVIEW CHECK</span><b id="bot-tradingview">NOT CONFIGURED</b></div><div><span>MAIN PAST TEST</span><b id="bot-backtest">WAITING FOR DATA</b></div><div><span>ALL PAST TRADES</span><b id="bot-backtest-sample">0 trades</b></div><div><span>RECENT HOLDOUT CHECK</span><b id="bot-backtest-holdout">0 trades</b></div></div><div class="sound-row"><span id="sound-state">Audio alerts start automatically when the browser permits playback.</span></div><small>The app never opens orders. A signal can still lose; check the stop amount first.</small>';
   document.querySelector('main').appendChild(panel);
 }
 
@@ -568,7 +534,7 @@ function addTimeframeAnalysis() {
   const section = document.createElement('section');
   section.className = 'analysis-section';
   const timeframes = {'1m': '1-MINUTE TRIGGER', '5m': '5-MINUTE SETUP', '15m': '15-MINUTE CHECK', '1h': 'BIG PICTURE · 1 HOUR'};
-  section.innerHTML = '<div class="panel-heading"><span class="label">MULTI-LAYER CONFLUENCE</span><span class="muted">5 layers: trend, structure, momentum, RSI, candle pattern. A score is not a confirmed entry.</span></div><div class="analysis-grid">' + Object.entries(timeframes).map(([timeframe, label]) => `<article id="analysis-${timeframe}" class="analysis-card"><div class="analysis-card-head"><strong>${label}</strong><span class="analysis-status">WAITING</span></div><div class="analysis-values"><span>CONFLUENCE <b class="analysis-action">WAIT</b></span><span>DIRECTION <b class="analysis-bias">--</b></span><span>TREND <b class="analysis-ema">--</b></span><span>BUY/SELL PUSH <b class="analysis-rsi">--</b></span><span>USUAL CANDLE MOVE <b class="analysis-atr">--</b></span><span>LAST PRICE <b class="analysis-close">--</b></span></div><div class="analysis-layers">Waiting for layer data</div></article>`).join('') + '</div>';
+  section.innerHTML = '<div class="panel-heading"><span class="label">MULTI-LAYER CONFLUENCE</span><span class="muted">Trend context only—not an entry alert. Wait for the validated main signal.</span></div><div class="analysis-grid">' + Object.entries(timeframes).map(([timeframe, label]) => `<article id="analysis-${timeframe}" class="analysis-card"><div class="analysis-card-head"><strong>${label}</strong><span class="analysis-status">WAITING</span></div><div class="analysis-values"><span>CLOSED-CANDLE BIAS <b class="analysis-action">WAIT</b></span><span>DIRECTION <b class="analysis-bias">--</b></span><span>TREND <b class="analysis-ema">--</b></span><span>BUY/SELL PUSH <b class="analysis-rsi">--</b></span><span>USUAL CANDLE MOVE <b class="analysis-atr">--</b></span><span>LAST PRICE <b class="analysis-close">--</b></span></div><div class="analysis-layers">Waiting for layer data</div></article>`).join('') + '</div>';
   document.querySelector('main').appendChild(section);
 }
 

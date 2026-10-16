@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 from analysis.indicators import indicators
-from analysis.candle_patterns import candle_confirmation
+from analysis.candle_patterns import breakout_confirmation, candle_confirmation
 from analysis.structure import market_structure
 from analysis.support_resistance import levels
 
@@ -70,6 +70,7 @@ def run_backtest(one_minute: pd.DataFrame, five_minute: pd.DataFrame | None = No
             and fifteen_structure['bias'] == 'BULLISH'
             and minute_structure['bias'] == 'BULLISH'
             and pattern['direction'] == 'BUY'
+            and breakout_confirmation(minute.iloc[index - 2:index + 1], 'BUY')
             and current.close > current.ema_20 > current.ema_50 > current.ema_200
             and setup.close > setup.ema_20 > setup.ema_50 > setup.ema_200
             and setup.ema_20 > setup_previous.ema_20
@@ -83,6 +84,7 @@ def run_backtest(one_minute: pd.DataFrame, five_minute: pd.DataFrame | None = No
             and fifteen_structure['bias'] == 'BEARISH'
             and minute_structure['bias'] == 'BEARISH'
             and pattern['direction'] == 'SELL'
+            and breakout_confirmation(minute.iloc[index - 2:index + 1], 'SELL')
             and current.close < current.ema_20 < current.ema_50 < current.ema_200
             and setup.close < setup.ema_20 < setup.ema_50 < setup.ema_200
             and setup.ema_20 < setup_previous.ema_20
@@ -221,6 +223,7 @@ def run_scalp_backtest(one_minute: pd.DataFrame, five_minute: pd.DataFrame, hold
             and current.close > current.ema_9
             and current.ema_9 >= previous.ema_9
             and confirmation['direction'] == 'BUY'
+            and breakout_confirmation(one.iloc[index - 2:index + 1], 'BUY')
             and 48 < current.rsi_14 < 68
             and abs(float(current.close) - float(current.ema_21)) <= atr * 1.25
         )
@@ -230,6 +233,7 @@ def run_scalp_backtest(one_minute: pd.DataFrame, five_minute: pd.DataFrame, hold
             and current.close < current.ema_9
             and current.ema_9 <= previous.ema_9
             and confirmation['direction'] == 'SELL'
+            and breakout_confirmation(one.iloc[index - 2:index + 1], 'SELL')
             and 32 < current.rsi_14 < 52
             and abs(float(current.close) - float(current.ema_21)) <= atr * 1.25
         )

@@ -88,16 +88,16 @@ class DerivFeedTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any('gap detected' in status.lower() for status in self.statuses))
         self.assertEqual(self.ticks, [])
 
-    async def test_default_feed_loads_and_subscribes_to_gold_symbol(self):
-        feed, socket = await self.run_feed_once({'epoch': 1, 'quote': 2310.25})
+    async def test_default_feed_loads_and_subscribes_to_step_index_symbol(self):
+        feed, socket = await self.run_feed_once({'epoch': 1, 'quote': 100})
 
         history_requests = [request for request in socket.requests if 'ticks_history' in request]
         tick_requests = [request for request in socket.requests if 'ticks' in request]
-        self.assertEqual(feed.requested_market, 'gold')
+        self.assertEqual(feed.requested_market, 'step_index')
         self.assertEqual(len(history_requests), 5)
-        self.assertTrue(all(request['ticks_history'] == 'frxXAUUSD' for request in history_requests))
-        self.assertEqual(tick_requests, [{'ticks': 'frxXAUUSD', 'subscribe': 1}])
-        self.assertEqual(self.ticks, [(1, 2310.25)])
+        self.assertTrue(all(request['ticks_history'] == 'stpRNG' for request in history_requests))
+        self.assertEqual(tick_requests, [{'ticks': 'stpRNG', 'subscribe': 1}])
+        self.assertEqual(self.ticks, [(1, 100)])
         self.assertEqual(len(feed.store.dataframe('5m')), 1)
 
     async def test_step_index_selection_uses_step_index_symbol(self):

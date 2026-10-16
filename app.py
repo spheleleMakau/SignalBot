@@ -2,6 +2,7 @@ import asyncio, base64, hmac, json, time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal
 import plotly.graph_objects as go
 import httpx
 from fastapi import FastAPI, HTTPException, Request
@@ -15,8 +16,8 @@ from market.candles import CandleStore
 from market.websocket import DerivFeed
 from market.symbols import DEFAULT_MARKET, MARKET_LABELS
 from analysis.signal_engine import SignalEngine
-from analysis.signal_journal import CONFIRMED_STATUSES, SignalJournal
-from backtest.engine import run_backtest, run_scalp_backtest
+from analysis.signal_journal import SignalJournal
+from backtest.engine import run_backtest
 from trading.risk import estimate_trade_values
 from trading.trade_manager import TradeManager
 
@@ -29,7 +30,14 @@ if not database_path.is_absolute():
     database_path = BASE_DIR / database_path
 
 store = CandleStore(); database = Database(str(database_path)); engine = SignalEngine(settings.symbol, settings.min_signal_score); manager = TradeManager(); journal = SignalJournal()
-state = {'connection': 'OFFLINE', 'last_tick': None, 'price': None, 'symbol': None, 'market_id': DEFAULT_MARKET, 'market_name': MARKET_LABELS[DEFAULT_MARKET], 'signal': {'status': 'NO LIVE DATA — NO SIGNAL', 'reasons': ['Waiting for a fresh live tick before evaluating an entry.']}, 'scalp_signal': {'status': 'NO LIVE DATA — NO SCALP SIGNAL', 'reasons': ['Waiting for a fresh live tick before evaluating a scalp entry.']}, 'trade_status': 'WAITING', 'exit_alert': None, 'backtest': {'status': 'WAITING FOR DATA'}, 'scalp_backtest': {'status': 'WAITING FOR DATA'}, 'app_mode': settings.app_mode}; feed_task = None; feed = None; last_saved_signal = None; last_saved_scalp_signal = None; last_backtest_candle = None; last_scalp_backtest_candle = None; last_saved_candles = {}
+SCALPING_DISABLED = {
+    'status': 'SCALPING DISABLED — USE MAIN SIGNAL',
+    'direction': None,
+    'reasons': ['Rapid scalp entries are disabled. Wait for the validated multi-timeframe main signal.'],
+}
+TRADINGVIEW_ALERT_MAX_AGE_SECONDS = 125
+latest_tradingview_alert = None
+state = {'connection': 'OFFLINE', 'last_tick': None, 'price': None, 'symbol': None, 'market_id': DEFAULT_MARKET, 'market_name': MARKET_LABELS[DEFAULT_MARKET], 'signal': {'status': 'NO LIVE DATA — NO SIGNAL', 'reasons': ['Waiting for a fresh live tick before evaluating an entry.']}, 'scalp_signal': dict(SCALPING_DISABLED), 'trade_status': 'WAITING', 'exit_alert': None, 'backtest': {'status': 'WAITING FOR DATA'}, 'scalp_backtest': {'status': 'DISABLED'}, 'app_mode': settings.app_mode}; feed_task = None; feed = None; last_saved_signal = None; last_backtest_candle = None; last_saved_candles = {}
 HISTORY_LIMIT = 20
 HISTORY_DETAIL_LIMIT = 50
 HISTORY_MAX_AGE_SECONDS = 24 * 60 * 60
@@ -79,7 +87,7 @@ def build_history(limit: int = HISTORY_LIMIT, symbol: str | None = None):
         if symbol and entry.get('symbol') != symbol:
             continue
         timestamp = int(entry.get('timestamp') or 0)
-        if entry.get('outcome') not in CONFIRMED_STATUSES or not now - HISTORY_MAX_AGE_SECONDS <= timestamp <= now:
+        if entry.get('outcome') != 'ENTRY CONFIRMED' or not now - HISTORY_MAX_AGE_SECONDS <= timestamp <= now:
             continue
         if not entry.get('direction') or entry.get('direction') == 'NONE':
             continue
@@ -119,23 +127,52 @@ def backtest_gate_status(backtest: dict) -> str:
     return 'BLOCKED · EXPECTANCY NOT POSITIVE'
 
 
+def tradingview_confirms(signal: dict, now: int | None = None) -> bool:
+    if not settings.tradingview_symbol or not settings.tradingview_webhook_token or not latest_tradingview_alert:
+        return False
+    moment = int(time.time()) if now is None else now
+    alert = latest_tradingview_alert
+    age = moment - int(alert['bar_timestamp'])
+    received_age = moment - int(alert['received_at'])
+    return (
+        alert['ticker'] == settings.tradingview_symbol
+        and alert['direction'] == signal.get('direction')
+        and alert['timeframe'] == '1'
+        and alert['bar_timestamp'] == signal.get('setup_timestamp')
+        and 0 <= received_age <= TRADINGVIEW_ALERT_MAX_AGE_SECONDS
+        and -5 <= age <= TRADINGVIEW_ALERT_MAX_AGE_SECONDS
+    )
+
+
+def withhold_unconfirmed_entry(signal: dict) -> None:
+    signal.update({
+        'status': 'WAIT — TRADINGVIEW CONFIRMATION REQUIRED',
+        'direction': None,
+        'score': 0,
+        'reasons': ['Entry withheld: no matching TradingView alert for this exact 1-minute candle, ticker, and direction.'],
+    })
+    for key in ('id', 'entry', 'stop_loss', 'tp1', 'tp2', 'risk_reward', 'setup_timestamp'):
+        signal.pop(key, None)
+
+
 async def on_status(status):
-    global last_backtest_candle, last_scalp_backtest_candle
+    global last_backtest_candle, latest_tradingview_alert
     state['connection'] = status
     if status != 'LIVE':
         last_backtest_candle = None
-        last_scalp_backtest_candle = None
+        latest_tradingview_alert = None
         last_saved_candles.clear()
         state['signal'] = {'status': 'NO LIVE DATA — NO SIGNAL', 'reasons': ['Waiting for a fresh live tick before evaluating an entry.']}
-        state['scalp_signal'] = {'status': 'NO LIVE DATA — NO SCALP SIGNAL', 'reasons': ['Waiting for a fresh live tick before evaluating a scalp entry.']}
+        state['scalp_signal'] = dict(SCALPING_DISABLED)
         state['trade_status'] = 'WAITING'
         state['backtest'] = {'status': 'WAITING FOR DATA'}
-        state['scalp_backtest'] = {'status': 'WAITING FOR DATA'}
+        state['scalp_backtest'] = {'status': 'DISABLED'}
 
 async def on_tick(epoch, price):
-    global last_saved_signal, last_saved_scalp_signal, last_backtest_candle, last_scalp_backtest_candle
+    global last_saved_signal, last_backtest_candle
     state.update({'last_tick': epoch, 'price': price})
-    signal = engine.evaluate(store, state['connection'] == 'LIVE'); scalp_signal = engine.evaluate_scalp(store, state['connection'] == 'LIVE')
+    signal = engine.evaluate(store, state['connection'] == 'LIVE')
+    scalp_signal = {**SCALPING_DISABLED, 'symbol': state['symbol'], 'timestamp': int(epoch)}
     five_minute = store.dataframe('5m')
     closed_five_minute = five_minute.iloc[:-1].reset_index(drop=True) if len(five_minute) > 1 else five_minute.iloc[:0].copy()
     one_minute = store.dataframe('1m')
@@ -157,22 +194,15 @@ async def on_tick(epoch, price):
             four_hour=closed_four_hour,
         )
         last_backtest_candle = backtest_candle
-    scalp_backtest_candle = int(closed_one_minute.timestamp.iloc[-1]) if not closed_one_minute.empty else None
-    if scalp_backtest_candle is not None and scalp_backtest_candle != last_scalp_backtest_candle:
-        state['scalp_backtest'] = run_scalp_backtest(closed_one_minute, closed_five_minute)
-        last_scalp_backtest_candle = scalp_backtest_candle
+    state['scalp_backtest'] = {'status': 'DISABLED'}
     backtest = state['backtest']
     if signal.get('status') == 'ENTRY CONFIRMED' and not backtest_passes(backtest):
         signal['status'] = 'NO TRADE — BACKTEST FILTER'
         signal['reasons'] = signal.get('reasons', []) + ['Historical validation has not confirmed positive expectancy']
         signal.pop('id', None); signal.pop('entry', None); signal.pop('stop_loss', None); signal.pop('tp1', None); signal.pop('tp2', None); signal.pop('risk_reward', None)
-    scalp_backtest = state['scalp_backtest']
-    if scalp_signal.get('status') == 'SCALP ENTRY CONFIRMED' and not backtest_passes(scalp_backtest):
-        scalp_signal['status'] = 'SCALP NO TRADE — BACKTEST FILTER'
-        scalp_signal['reasons'] = scalp_signal.get('reasons', []) + [f"Scalp strategy validation blocked this entry: {backtest_gate_status(scalp_backtest)}; requires at least 10 resolved trades and positive expectancy."]
-        scalp_signal.pop('id', None); scalp_signal.pop('entry', None); scalp_signal.pop('stop_loss', None); scalp_signal.pop('tp1', None); scalp_signal.pop('tp2', None); scalp_signal.pop('risk_reward', None)
+    if signal.get('status') == 'ENTRY CONFIRMED' and not tradingview_confirms(signal):
+        withhold_unconfirmed_entry(signal)
     journal.record(signal)
-    journal.record(scalp_signal)
     active_trade = manager.active.copy() if manager.active else None
     trade_status = manager.update(signal, price)
     if active_trade and trade_status in {'STOP LOSS HIT', 'TARGET 1 HIT', 'TARGET 2 HIT'}:
@@ -191,23 +221,20 @@ async def on_tick(epoch, price):
             last_saved_candles[timeframe] = candles[-1]['timestamp']
     if signal.get('id') and signal.get('id') != last_saved_signal:
         database.save_signal(signal); last_saved_signal = signal['id']
-    if scalp_signal.get('id') and scalp_signal.get('id') != last_saved_scalp_signal:
-        database.save_signal(scalp_signal); last_saved_scalp_signal = scalp_signal['id']
 
 async def on_symbol(market_id, symbol, market_name):
     reset_market_state(market_id, symbol, market_name)
 
 def reset_market_state(market_id, symbol, market_name):
-    global last_saved_signal, last_saved_scalp_signal, last_backtest_candle, last_scalp_backtest_candle
+    global last_saved_signal, last_backtest_candle, latest_tradingview_alert
     store.clear()
     manager.active = None
     engine.symbol = symbol
     engine.last_setup_key = None
     journal.entries.clear()
     last_saved_signal = None
-    last_saved_scalp_signal = None
     last_backtest_candle = None
-    last_scalp_backtest_candle = None
+    latest_tradingview_alert = None
     last_saved_candles.clear()
     state.update({
         'market_id': market_id,
@@ -217,11 +244,11 @@ def reset_market_state(market_id, symbol, market_name):
         'last_tick': None,
         'price': None,
         'signal': {'status': 'NO LIVE DATA — NO SIGNAL', 'reasons': ['Waiting for the selected market feed.']},
-        'scalp_signal': {'status': 'NO LIVE DATA — NO SCALP SIGNAL', 'reasons': ['Waiting for the selected market feed.']},
+        'scalp_signal': dict(SCALPING_DISABLED),
         'trade_status': 'WAITING',
         'exit_alert': None,
         'backtest': {'status': 'WAITING FOR DATA'},
-        'scalp_backtest': {'status': 'WAITING FOR DATA'},
+        'scalp_backtest': {'status': 'DISABLED'},
     })
 
 @asynccontextmanager
@@ -243,7 +270,8 @@ async def disable_static_cache(request, call_next):
 
 @app.middleware('http')
 async def protect_dashboard(request, call_next):
-    if settings.dashboard_auth_required and request.url.path != '/healthz':
+    is_tradingview_webhook = request.url.path.startswith('/api/tradingview/webhook/')
+    if settings.dashboard_auth_required and request.url.path != '/healthz' and not is_tradingview_webhook:
         credentials = f'{settings.dashboard_username}:{settings.dashboard_password}'.encode()
         expected = 'Basic ' + base64.b64encode(credentials).decode('ascii')
         supplied = request.headers.get('authorization', '')
@@ -261,6 +289,47 @@ async def index(request: Request):
     symbol_label = 'AVIATOR' if mode == 'aviator' else (state.get('symbol') or 'WAITING FOR LIVE SYMBOL')
     template_name = 'aviator.html' if mode == 'aviator' else 'index.html'
     return templates.TemplateResponse(template_name, {'request': request, 'symbol': symbol_label, 'app_mode': mode, 'page_title': title})
+
+
+class TradingViewWebhookAlert(BaseModel):
+    ticker: str
+    direction: Literal['BUY', 'SELL']
+    timeframe: str
+    bar_time: str
+
+
+@app.post('/api/tradingview/webhook/{webhook_token}')
+async def tradingview_webhook(webhook_token: str, alert: TradingViewWebhookAlert):
+    global latest_tradingview_alert
+    if not settings.tradingview_webhook_token or not settings.tradingview_symbol:
+        raise HTTPException(status_code=503, detail='TradingView confirmation is not configured')
+    if not hmac.compare_digest(webhook_token, settings.tradingview_webhook_token):
+        raise HTTPException(status_code=401, detail='Invalid TradingView webhook token')
+    if not hmac.compare_digest(alert.ticker, settings.tradingview_symbol):
+        raise HTTPException(status_code=422, detail='TradingView ticker does not match the configured market')
+    if alert.timeframe != '1':
+        raise HTTPException(status_code=422, detail='Only confirmed 1-minute TradingView alerts are accepted')
+    try:
+        bar_time = datetime.fromisoformat(alert.bar_time.replace('Z', '+00:00'))
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail='bar_time must be a UTC ISO-8601 timestamp') from error
+    if bar_time.tzinfo is None:
+        raise HTTPException(status_code=422, detail='bar_time must include a timezone')
+    if bar_time.utcoffset() != timezone.utc.utcoffset(bar_time):
+        raise HTTPException(status_code=422, detail='bar_time must be expressed in UTC')
+    bar_timestamp = int(bar_time.timestamp())
+    now = int(time.time())
+    age = now - bar_timestamp
+    if age < -5 or age > TRADINGVIEW_ALERT_MAX_AGE_SECONDS:
+        raise HTTPException(status_code=422, detail='TradingView alert is outside the accepted time window')
+    latest_tradingview_alert = {
+        'ticker': alert.ticker,
+        'direction': alert.direction,
+        'timeframe': alert.timeframe,
+        'bar_timestamp': bar_timestamp,
+        'received_at': now,
+    }
+    return {'status': 'CONFIRMATION RECEIVED', 'ticker': alert.ticker, 'direction': alert.direction, 'bar_timestamp': bar_timestamp}
 
 @app.get('/healthz')
 async def health_check():
@@ -313,25 +382,24 @@ async def api_state(request: Request):
             'price': None,
             'symbol': 'AVIATOR',
             'signal': await fetch_aviator_signal(),
-            'scalp_signal': {'status': 'NO AVIATOR SCALP SIGNAL', 'direction': None, 'score': 0, 'reasons': ['Aviator mode is separate from Step Index'], 'timestamp': int(time.time())},
+            'scalp_signal': dict(SCALPING_DISABLED),
             'trade_status': 'WAITING',
             'backtest': {'status': 'POWER MODE'},
             'candles': {},
             'history': [],
             'timeframe_analysis': {},
-            'bot': {'mode': 'AVIATOR POWER MODE', 'orders_enabled': False, 'feed_age_seconds': 0, 'feed_quality': 'LIVE' if bool(settings.aviator_signal_url) else 'OFFLINE', 'risk_guard': 'ACTIVE', 'execution_note': 'Separate mode for Aviator signal feed; Step Index behavior remains unchanged.'},
+            'bot': {'mode': 'AVIATOR POWER MODE', 'orders_enabled': False, 'feed_age_seconds': 0, 'feed_quality': 'LIVE' if bool(settings.aviator_signal_url) else 'OFFLINE', 'risk_guard': 'ACTIVE', 'tradingview_confirmation': 'NOT USED IN AVIATOR MODE', 'execution_note': 'Separate mode for Aviator signal feed; Step Index behavior remains unchanged.'},
             'today_trend': {'direction': 'WAITING'}
         }
         return payload
     payload = dict(state); payload['candles'] = {tf: list(values)[-120:] for tf, values in store.frames.items()}; payload['history'] = build_history(limit=HISTORY_DETAIL_LIMIT, symbol=state.get('symbol')); payload['app_mode'] = mode
     payload['trade_values'] = estimate_trade_values(payload.get('signal', {}), settings.usd_per_price_unit_per_lot)
-    payload['scalp_trade_values'] = estimate_trade_values(payload.get('scalp_signal', {}), settings.usd_per_price_unit_per_lot)
     feed_age = None if not state['last_tick'] else max(0, int(time.time()) - int(state['last_tick']))
     feed_is_fresh = state['connection'] == 'LIVE' and feed_age is not None and feed_age <= 10
     payload['timeframe_analysis'] = build_timeframe_analysis(store, state['last_tick'], feed_is_fresh)
     backtest = state.get('backtest') or {}
-    scalp_backtest = state.get('scalp_backtest') or {}
-    payload['bot'] = {'mode': 'ALERT_ONLY', 'orders_enabled': False, 'feed_age_seconds': feed_age, 'feed_quality': 'LIVE' if state['connection'] == 'LIVE' and feed_age is not None and feed_age <= 10 else 'STALE', 'risk_guard': 'ACTIVE', 'backtest_status': backtest_gate_status(backtest), 'backtest_trades': backtest.get('trades', 0), 'backtest_profit_factor': backtest.get('profit_factor'), 'backtest_validation_trades': backtest.get('validation_trades', 0), 'backtest_validation_profit_factor': backtest.get('validation_profit_factor'), 'scalp_backtest_status': backtest_gate_status(scalp_backtest), 'scalp_backtest_trades': scalp_backtest.get('trades', 0), 'scalp_backtest_profit_factor': scalp_backtest.get('profit_factor'), 'scalp_backtest_validation_trades': scalp_backtest.get('validation_trades', 0), 'scalp_backtest_validation_profit_factor': scalp_backtest.get('validation_profit_factor'), 'execution_note': 'No orders are placed by this application.'}
+    tv_configured = bool(settings.tradingview_symbol and settings.tradingview_webhook_token)
+    payload['bot'] = {'mode': 'ALERT_ONLY', 'orders_enabled': False, 'feed_age_seconds': feed_age, 'feed_quality': 'LIVE' if state['connection'] == 'LIVE' and feed_age is not None and feed_age <= 10 else 'STALE', 'risk_guard': 'ACTIVE', 'backtest_status': backtest_gate_status(backtest), 'backtest_trades': backtest.get('trades', 0), 'backtest_profit_factor': backtest.get('profit_factor'), 'backtest_validation_trades': backtest.get('validation_trades', 0), 'backtest_validation_profit_factor': backtest.get('validation_profit_factor'), 'scalp_backtest_status': 'DISABLED', 'tradingview_confirmation': 'CONFIGURED · WAITING FOR MATCH' if tv_configured else 'NOT CONFIGURED · ENTRIES BLOCKED', 'execution_note': 'No orders are placed by this application. Scalping is disabled.'}
     today = datetime.now(timezone.utc).date()
     candles = [candle for candle in store.snapshot()['5m'] if datetime.fromtimestamp(candle['timestamp'], timezone.utc).date() == today]
     if candles:
@@ -344,6 +412,7 @@ async def api_state(request: Request):
 
 def build_timeframe_analysis(market_store, last_tick, feed_is_fresh):
     from analysis.candle_patterns import candle_confirmation
+    from analysis.candle_patterns import breakout_confirmation
     from analysis.indicators import indicators
     from analysis.structure import market_structure
 
@@ -368,15 +437,17 @@ def build_timeframe_analysis(market_store, last_tick, feed_is_fresh):
         ema_ready = all(latest[key] == latest[key] for key in ('ema_20', 'ema_50', 'ema_200'))
         recent_price_change = latest.close - enriched.close.iloc[-4]
         recent_ema_change = latest.ema_20 - enriched.ema_20.iloc[-4]
-        short_bullish = latest.close > latest.ema_20 > latest.ema_50 and recent_price_change > 0 and recent_ema_change > 0
-        short_bearish = latest.close < latest.ema_20 < latest.ema_50 and recent_price_change < 0 and recent_ema_change < 0
+        bullish_breakout = breakout_confirmation(enriched, 'BUY')
+        bearish_breakout = breakout_confirmation(enriched, 'SELL')
+        short_bullish = ema_ready and latest.close > latest.ema_20 > latest.ema_50 > latest.ema_200 and recent_price_change > 0 and recent_ema_change > 0 and bullish_breakout
+        short_bearish = ema_ready and latest.close < latest.ema_20 < latest.ema_50 < latest.ema_200 and recent_price_change < 0 and recent_ema_change < 0 and bearish_breakout
         pattern = candle_confirmation(enriched)
         layers = {
             'trend': 'BULLISH' if short_bullish else 'BEARISH' if short_bearish else 'NEUTRAL',
             'structure': 'BULLISH' if structure['bias'] == 'BULLISH' else 'BEARISH' if structure['bias'] == 'BEARISH' else 'NEUTRAL',
             'momentum': 'BULLISH' if recent_price_change > 0 and recent_ema_change > 0 else 'BEARISH' if recent_price_change < 0 and recent_ema_change < 0 else 'NEUTRAL',
             'rsi': 'BULLISH' if 52 <= latest.rsi_14 <= 68 else 'BEARISH' if 32 <= latest.rsi_14 <= 48 else 'NEUTRAL',
-            'pattern': pattern['direction'] if pattern['direction'] in {'BUY', 'SELL'} else 'NEUTRAL',
+            'pattern': pattern['direction'] if pattern['direction'] in {'BUY', 'SELL'} and breakout_confirmation(enriched, pattern['direction']) else 'NEUTRAL',
         }
         layers['pattern'] = 'BULLISH' if layers['pattern'] == 'BUY' else 'BEARISH' if layers['pattern'] == 'SELL' else 'NEUTRAL'
         bullish_votes = sum(value == 'BULLISH' for value in layers.values())
@@ -516,9 +587,8 @@ async def api_chart(timeframe: str = '5m'):
                 hovertemplate='%{text}<extra></extra>',
             ))
 
-    for plan, prefix in ((state.get('signal', {}), ''), (state.get('scalp_signal', {}), 'SCALP ')):
-        if plan.get('status') not in {'ENTRY CONFIRMED', 'SCALP ENTRY CONFIRMED'}:
-            continue
+    plan = state.get('signal', {})
+    if plan.get('status') == 'ENTRY CONFIRMED':
         entry = plan.get('entry')
         stop = plan.get('stop_loss')
         target_1 = plan.get('tp1')
@@ -544,7 +614,7 @@ async def api_chart(timeframe: str = '5m'):
             if plan.get(key) is not None:
                 chart.add_hline(
                     y=plan[key], line_color=color, line_dash='dash' if key == 'stop_loss' else 'solid',
-                    line_width=2, annotation_text=f"{prefix}{label} · {float(plan[key]):.2f}",
+                    line_width=2, annotation_text=f"{label} · {float(plan[key]):.2f}",
                     annotation_position='right', annotation_font_color=color,
                     annotation_bgcolor='rgba(11,17,23,.85)',
                 )
@@ -555,7 +625,7 @@ async def api_chart(timeframe: str = '5m'):
         label = 'PRICE FLOOR' if level['type'] == 'support' else 'PRICE CEILING'
         chart.add_hline(y=level['price'], line_color=color, line_dash='dot', opacity=.65, annotation_text=f"{label} · {level['tests']} tests")
     action = state.get('timeframe_analysis', {}).get(timeframe, {}).get('action', 'WAIT')
-    bias_label = {'BUY': 'BUY BIAS', 'SELL': 'SELL BIAS', 'WAIT': 'WAIT'}[action]
+    bias_label = {'BUY': 'UP BIAS', 'SELL': 'DOWN BIAS', 'WAIT': 'WAIT'}[action]
     chart.update_layout(template='plotly_dark', height=520, margin={'l':20,'r':20,'t':54,'b':34}, title={'text': f"{chart_context['market_name']} · {timeframe_label} · {bias_label} · BIAS ONLY, NOT AN ENTRY", 'x': .02, 'xanchor': 'left', 'font': {'size': 16}}, legend={'orientation': 'h', 'y': 1.02, 'x': 0}, hovermode='x unified', xaxis={'fixedrange': False}, yaxis={'fixedrange': False}, xaxis_rangeslider_visible=False, uirevision=f"{chart_context['market_id']}:{chart_context['symbol']}:{timeframe}")
     return {**chart_context, **json.loads(chart.to_json())}
 

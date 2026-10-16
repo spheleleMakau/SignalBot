@@ -1,7 +1,7 @@
 import time
 import uuid
 from math import floor
-from .candle_patterns import candle_confirmation
+from .candle_patterns import breakout_confirmation, candle_confirmation
 from .support_resistance import levels
 from .timeframe import multi_timeframe
 from .indicators import indicators
@@ -171,7 +171,8 @@ class SignalEngine:
         sell_ema_alignment = all((latest[key] == latest[key]) for key in ('ema_20', 'ema_50', 'ema_200')) and latest.close < latest.ema_20 < latest.ema_50 < latest.ema_200 and setup_candle.close < setup_candle.ema_20 < setup_candle.ema_50 < setup_candle.ema_200 and setup_candle.ema_20 < setup_previous.ema_20
         rsi_momentum = (45 < latest.rsi_14 < 70) if higher == 'BULLISH' else (30 < latest.rsi_14 < 55) if higher == 'BEARISH' else False
         not_chasing = abs(current - latest.ema_20) <= atr * 1.5 if latest.ema_20 == latest.ema_20 else False
-        direction = 'BUY' if aligned_direction == 'BUY' and higher == 'BULLISH' and setup == 'BULLISH' and structure['bias'] == 'BULLISH' and confirmation['direction'] == 'BUY' and buy_ema_alignment and rsi_momentum and not_chasing else 'SELL' if aligned_direction == 'SELL' and higher == 'BEARISH' and setup == 'BEARISH' and structure['bias'] == 'BEARISH' and confirmation['direction'] == 'SELL' and sell_ema_alignment and rsi_momentum and not_chasing else None
+        follow_through = breakout_confirmation(one_minute, aligned_direction)
+        direction = 'BUY' if aligned_direction == 'BUY' and higher == 'BULLISH' and setup == 'BULLISH' and structure['bias'] == 'BULLISH' and confirmation['direction'] == 'BUY' and follow_through and buy_ema_alignment and rsi_momentum and not_chasing else 'SELL' if aligned_direction == 'SELL' and higher == 'BEARISH' and setup == 'BEARISH' and structure['bias'] == 'BEARISH' and confirmation['direction'] == 'SELL' and follow_through and sell_ema_alignment and rsi_momentum and not_chasing else None
         score = 0; reasons = []
         if direction:
             score += 20; reasons.append('Higher-timeframe direction and 15M structure align'); score += 20; reasons.append('Market structure confirms direction')
@@ -187,137 +188,25 @@ class SignalEngine:
             tp1 = targets[0] if targets else current + unit_risk * 2 * (1 if direction == 'BUY' else -1); tp2 = targets[1] if len(targets) > 1 else current + unit_risk * 3 * (1 if direction == 'BUY' else -1)
             rr = abs(tp1-current) / unit_risk if unit_risk else 0
             if rr >= 2 and score >= self.minimum_score:
-                key = f'{self.symbol}:{direction}:{one_minute.timestamp.iloc[-1]}'; base.update({'id': str(uuid.uuid5(uuid.NAMESPACE_URL, key)), 'status': 'ENTRY CONFIRMED', 'direction': direction, 'score': score, 'entry': current, 'stop_loss': stop, 'tp1': tp1, 'tp2': tp2, 'risk_reward': rr, 'reasons': reasons, 'setup': 'PULLBACK'})
+                key = f'{self.symbol}:{direction}:{one_minute.timestamp.iloc[-1]}'; base.update({'id': str(uuid.uuid5(uuid.NAMESPACE_URL, key)), 'status': 'ENTRY CONFIRMED', 'direction': direction, 'setup_timestamp': int(one_minute.timestamp.iloc[-1]), 'score': score, 'entry': current, 'stop_loss': stop, 'tp1': tp1, 'tp2': tp2, 'risk_reward': rr, 'reasons': reasons, 'setup': 'PULLBACK'})
                 self.last_setup_key = key; return base
             base['status'] = 'NO TRADE — POOR RISK/REWARD' if rr < 2 else 'NO TRADE — SCORE BELOW THRESHOLD'
         else:
             base['status'] = 'WAIT — ENTRY CONDITIONS NOT MET'
-            base['reasons'] = ['All timeframe directions agree, but the 1-minute trigger and risk checks have not all passed.']
+            base['reasons'] = (
+                [f'Wait for a closed 1-minute candle to break the previous candle {"high" if aligned_direction == "BUY" else "low"} in the {aligned_direction.lower()} direction.']
+                if confirmation['direction'] == aligned_direction and not follow_through
+                else ['All timeframe directions agree, but the 1-minute trigger and risk checks have not all passed.']
+            )
         return base
 
     def evaluate_scalp(self, store, connected: bool):
-        base = {'id': None, 'symbol': self.symbol, 'status': 'NO SCALP SIGNAL', 'direction': None, 'score': 0, 'reasons': [], 'timestamp': int(time.time()), 'scenarios': {'BUY': {'status': 'WAITING FOR LIVE CANDLES', 'reasons': []}, 'SELL': {'status': 'WAITING FOR LIVE CANDLES', 'reasons': []}}}
-        if not connected:
-            base['status'] = 'NO LIVE DATA — NO SCALP SIGNAL'
-            base['reasons'] = ['Waiting for a fresh live tick before evaluating a scalp entry.']
-            return base
-        aligned_direction = _timeframe_alignment(multi_timeframe(store, closed_only=True))
-        if aligned_direction is None:
-            base['status'] = 'SCALP WAIT — TIMEFRAMES NOT ALIGNED'
-            base['reasons'] = ['The closed 4H, 1H, 15M, 5M, and 1M trends do not all agree. No scalp direction is issued.']
-            return base
-        one_minute = store.dataframe('1m')
-        five_minute = store.dataframe('5m')
-        if len(one_minute) > 1: one_minute = one_minute.iloc[:-1].reset_index(drop=True)
-        if len(five_minute) > 1: five_minute = five_minute.iloc[:-1].reset_index(drop=True)
-        if len(one_minute) < 60 or len(five_minute) < 60:
-            base['status'] = 'SCALP WAITING FOR 1M/5M DATA'
-            base['reasons'] = [f"Waiting for 60 closed candles on both timeframes; available: 1M {len(one_minute)}/60, 5M {len(five_minute)}/60."]
-            return base
-        one_minute = indicators(one_minute)
-        five_minute = indicators(five_minute)
-        one_minute['ema_9'] = one_minute.close.ewm(span=9, adjust=False, min_periods=9).mean()
-        one_minute['ema_21'] = one_minute.close.ewm(span=21, adjust=False, min_periods=21).mean()
-        current = one_minute.iloc[-1]
-        previous = one_minute.iloc[-2]
-        trend = five_minute.iloc[-1]
-        confirmation = candle_confirmation(one_minute)
-        atr = float(current.atr_14)
-        if atr != atr or atr <= 0:
-            base['status'] = 'SCALP WAITING FOR VOLATILITY'
-            base['reasons'] = ['Waiting for valid 1M ATR before evaluating a BUY or SELL trigger.']
-            return base
-        buy_trend = trend.close > trend.ema_20 > trend.ema_50
-        sell_trend = trend.close < trend.ema_20 < trend.ema_50
-        def scenario(direction, trend_aligned):
-            if not trend_aligned:
-                relation = 'above' if direction == 'BUY' else 'below'
-                return {
-                    'status': 'WAITING FOR 5M TREND',
-                    'reasons': [f'Need a completed 5-minute close {relation} EMA20 {float(trend.ema_20):.2f}, with EMA20 {relation} EMA50 {float(trend.ema_50):.2f}.'],
-                }
-            pending = []
-            is_buy = direction == 'BUY'
-            rsi_range = (48 < current.rsi_14 < 68) if is_buy else (32 < current.rsi_14 < 52)
-            near_trigger = abs(float(current.close) - float(current.ema_21)) <= atr * 1.25
-            if (current.ema_9 <= current.ema_21) if is_buy else (current.ema_9 >= current.ema_21):
-                pending.append(f'Wait for 1-minute EMA9 to move {"above" if is_buy else "below"} EMA21.')
-            if (current.close <= current.ema_9 or current.ema_9 < previous.ema_9) if is_buy else (current.close >= current.ema_9 or current.ema_9 > previous.ema_9):
-                pending.append(f'Wait for a finished 1-minute candle to reclaim EMA9 while it turns {"upward" if is_buy else "downward"}.')
-            if confirmation['direction'] != direction:
-                pending.append(f'Wait for a confirmed {"bullish" if is_buy else "bearish"} candle pattern on the closed 1-minute candle.')
-            if not rsi_range:
-                pending.append(f'Wait for 1-minute RSI in {"48-68" if is_buy else "32-52"}; current RSI is {float(current.rsi_14):.1f}.')
-            if not near_trigger:
-                pending.append(f'Wait for price to return within 1.25 ATR of 1-minute EMA21 at {float(current.ema_21):.2f}.')
-            return {
-                'status': 'WAITING FOR 1M CONFIRMATION' if pending else 'TECHNICAL SETUP MET · CHECK FILTER',
-                'reasons': pending or ['1-minute conditions align; final entry still requires the historical validation filter.'],
-            }
-
-        base['scenarios'] = {
-            'BUY': scenario('BUY', buy_trend),
-            'SELL': scenario('SELL', sell_trend),
+        return {
+            'id': None,
+            'symbol': self.symbol,
+            'status': 'SCALPING DISABLED — USE MAIN SIGNAL',
+            'direction': None,
+            'score': 0,
+            'reasons': ['Rapid scalp entries are disabled. Wait for the validated multi-timeframe main signal.'],
+            'timestamp': int(time.time()),
         }
-        bullish = trend.close > trend.ema_20 > trend.ema_50 and current.ema_9 > current.ema_21 and current.close > current.ema_9 and current.ema_9 >= previous.ema_9
-        bearish = trend.close < trend.ema_20 < trend.ema_50 and current.ema_9 < current.ema_21 and current.close < current.ema_9 and current.ema_9 <= previous.ema_9
-        direction = 'BUY' if aligned_direction == 'BUY' and bullish and confirmation['direction'] == 'BUY' else 'SELL' if aligned_direction == 'SELL' and bearish and confirmation['direction'] == 'SELL' else None
-        if direction:
-            rsi_ok = 48 < current.rsi_14 < 68 if direction == 'BUY' else 32 < current.rsi_14 < 52
-            near_trigger = abs(float(current.close) - float(current.ema_21)) <= atr * 1.25
-            score = 30 + 25 + 20 + (15 if rsi_ok else 0) + (10 if near_trigger else 0)
-            base['reasons'] = ['5M trend agrees with 1M EMA 9/21 trigger', *confirmation['patterns']]
-            if rsi_ok: base['reasons'].append('1M RSI confirms momentum without an extreme')
-            if near_trigger: base['reasons'].append('Price is close to the 1M trigger EMA')
-            if score >= 80 and rsi_ok and near_trigger:
-                entry, timing_status = _live_entry_price(store, current, atr)
-                if timing_status:
-                    base['status'] = timing_status.replace('WAIT —', 'SCALP WAIT —')
-                    base['reasons'] = ['Wait for a fresh 1-minute close and a live price near its signal level.']
-                    return base
-                risk = atr * 1.1
-                stop = entry - risk if direction == 'BUY' else entry + risk
-                sign = 1 if direction == 'BUY' else -1
-                base.update({'id': f'scalp:{self.symbol}:{direction}:{int(current.timestamp)}', 'status': 'SCALP ENTRY CONFIRMED', 'direction': direction, 'score': score, 'entry': entry, 'stop_loss': stop, 'tp1': entry + risk * 1.5 * sign, 'tp2': entry + risk * 2 * sign, 'risk_reward': 1.5, 'setup': '1M EMA PULLBACK'})
-                return base
-            base['status'] = 'SCALP SETUP — WAITING FOR PULLBACK'
-            base['score'] = score
-            base['watch_direction'] = direction
-            pending = []
-            if not rsi_ok:
-                pending.append(f"Wait for 1M RSI in {('48-68' if direction == 'BUY' else '32-52')}; current RSI is {float(current.rsi_14):.1f}.")
-            if not near_trigger:
-                pending.append(f"Wait for price to return within 1.25 ATR of 1M EMA21 at {float(current.ema_21):.2f}.")
-            base['reasons'] = pending
-            return base
-        if (aligned_direction == 'BUY' and buy_trend) or (aligned_direction == 'SELL' and sell_trend):
-            watch_direction = aligned_direction
-            base['status'] = 'SCALP WAIT — 1M TRIGGER NOT CONFIRMED'
-            pending = []
-            if watch_direction == 'BUY':
-                if current.ema_9 <= current.ema_21:
-                    pending.append('Wait for 1M EMA9 to move above EMA21.')
-                if current.close <= current.ema_9 or current.ema_9 < previous.ema_9:
-                    pending.append('Wait for a closed 1M candle to reclaim EMA9 while EMA9 turns upward.')
-                if confirmation['direction'] != 'BUY':
-                    pending.append('Wait for bullish engulfing or rejection-pin confirmation on a closed 1M candle.')
-                if not 48 < current.rsi_14 < 68:
-                    pending.append(f'Wait for 1M RSI between 48 and 68; current RSI is {float(current.rsi_14):.1f}.')
-                if abs(float(current.close) - float(current.ema_21)) > atr * 1.25:
-                    pending.append(f'Wait for price to return within 1.25 ATR of 1M EMA21 at {float(current.ema_21):.2f}.')
-            else:
-                if current.ema_9 >= current.ema_21:
-                    pending.append('Wait for 1M EMA9 to move below EMA21.')
-                if current.close >= current.ema_9 or current.ema_9 > previous.ema_9:
-                    pending.append('Wait for a closed 1M candle to lose EMA9 while EMA9 turns downward.')
-                if confirmation['direction'] != 'SELL':
-                    pending.append('Wait for bearish engulfing or rejection-pin confirmation on a closed 1M candle.')
-                if not 32 < current.rsi_14 < 52:
-                    pending.append(f'Wait for 1M RSI between 32 and 52; current RSI is {float(current.rsi_14):.1f}.')
-                if abs(float(current.close) - float(current.ema_21)) > atr * 1.25:
-                    pending.append(f'Wait for price to return within 1.25 ATR of 1M EMA21 at {float(current.ema_21):.2f}.')
-            base['reasons'] = pending
-            return base
-        base['status'] = 'SCALP WAIT — TIMEFRAMES NOT ALIGNED'
-        base['reasons'] = ['The short-term setup conflicts with the higher-timeframe direction. No scalp direction is issued.']
-        return base

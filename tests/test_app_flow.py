@@ -5,7 +5,6 @@ from unittest.mock import patch
 
 import app
 from market.candles import CandleStore
-from analysis.signal_journal import SignalJournal
 from trading.trade_manager import TradeManager
 
 
@@ -29,7 +28,7 @@ class AppFlowTests(unittest.TestCase):
         self.assertEqual(live_analysis['1m']['confluence']['total_layers'], 5)
         self.assertEqual(stale_analysis['1m']['confluence']['action'], 'WAIT')
 
-    def test_timeframe_analysis_shows_sell_before_ema200_turns_down(self):
+    def test_timeframe_analysis_waits_for_long_trend_before_showing_sell(self):
         store = CandleStore()
         closes = [100 + index * 0.1 for index in range(300)]
         closes.extend(
@@ -53,12 +52,12 @@ class AppFlowTests(unittest.TestCase):
         from analysis.indicators import indicators
         latest = indicators(store.dataframe('1m').iloc[:-1]).iloc[-1]
 
-        self.assertEqual(result['action'], 'SELL')
-        self.assertEqual(result['bias'], 'BEARISH')
+        self.assertEqual(result['action'], 'WAIT')
+        self.assertNotEqual(result['bias'], 'BEARISH')
         self.assertEqual(result['ema_alignment'], 'MIXED')
         self.assertGreater(latest.close, latest.ema_200)
-        self.assertGreaterEqual(result['confluence']['bearish_votes'], 3)
-        self.assertEqual(result['confluence']['action'], 'SELL')
+        self.assertLess(result['confluence']['bearish_votes'], 3)
+        self.assertEqual(result['confluence']['action'], 'WAIT')
 
     def test_timeframe_analysis_does_not_show_buy_during_recent_decline(self):
         store = CandleStore()
@@ -225,9 +224,7 @@ class AppFlowTests(unittest.TestCase):
             patch.object(app, 'store', CandleStore()), \
             patch.object(app.engine, 'symbol', 'stpRNG'), \
             patch.object(app, 'last_saved_signal', None), \
-            patch.object(app, 'last_saved_scalp_signal', None), \
             patch.object(app, 'last_backtest_candle', None), \
-            patch.object(app, 'last_scalp_backtest_candle', None), \
             patch.object(app, 'last_saved_candles', {}), \
             patch.object(app.journal, 'entries', []), \
             patch.object(app.manager, 'active', None), \
@@ -245,9 +242,7 @@ class AppFlowTests(unittest.TestCase):
         with patch.object(app, 'store', store), \
                 patch.object(app.engine, 'symbol', 'stpRNG'), \
                 patch.object(app, 'last_saved_signal', None), \
-                patch.object(app, 'last_saved_scalp_signal', None), \
                 patch.object(app, 'last_backtest_candle', None), \
-                patch.object(app, 'last_scalp_backtest_candle', None), \
                 patch.object(app, 'last_saved_candles', {}), \
                 patch.object(app.journal, 'entries', []), \
                 patch.object(app.manager, 'active', None), \
@@ -281,7 +276,7 @@ class AppFlowTests(unittest.TestCase):
                 patch.object(app, 'last_saved_candles', {}), \
                 patch.dict(app.state, {'connection': 'LIVE', 'backtest': {'status': 'WAITING FOR DATA'}}), \
                 patch.object(app.engine, 'evaluate', return_value=no_signal), \
-                patch.object(app.engine, 'evaluate_scalp', return_value=no_signal), \
+                patch.object(app.engine, 'evaluate_scalp') as evaluate_scalp, \
                 patch.object(app, 'run_backtest', side_effect=record_backtest), \
                 patch.object(app.database, 'save_candles'), \
                 patch.object(app.database, 'save_signal'), \
@@ -293,52 +288,80 @@ class AppFlowTests(unittest.TestCase):
             store.add_tick(250 * 300 + 10, 100.0)
             asyncio.run(app.on_tick(250 * 300 + 10, 100.0))
             self.assertEqual(backtest_lengths, [(0, 249, 0, 0, 5), (0, 250, 0, 0, 5)])
+            evaluate_scalp.assert_not_called()
 
-    def test_scalp_entry_is_blocked_until_its_backtest_passes(self):
+    def test_scalping_is_disabled_in_live_tick_flow(self):
         store = CandleStore()
         candle = {'epoch': 0, 'open': 100, 'high': 101, 'low': 99, 'close': 100}
         store.load_candles('1m', [candle, {**candle, 'epoch': 60}])
         store.load_candles('5m', [candle, {**candle, 'epoch': 300}])
-        scalp_signal = {
-            'id': 'scalp-test',
-            'symbol': '1HZ100V',
-            'status': 'SCALP ENTRY CONFIRMED',
-            'direction': 'BUY',
-            'score': 90,
-            'entry': 100,
-            'stop_loss': 99,
-            'tp1': 101.5,
-            'tp2': 102,
-            'risk_reward': 1.5,
-            'reasons': ['test setup'],
-            'timestamp': 3600,
-        }
 
         with patch.object(app, 'store', store), \
                 patch.object(app, 'last_backtest_candle', None), \
-                patch.object(app, 'last_scalp_backtest_candle', None), \
                 patch.object(app, 'last_saved_candles', {}), \
                 patch.dict(app.state, {
                     'connection': 'LIVE',
                     'backtest': {'status': 'INSUFFICIENT HISTORICAL DATA', 'trades': 0},
-                    'scalp_backtest': {'status': 'INSUFFICIENT HISTORICAL DATA', 'trades': 0},
+                    'scalp_backtest': {'status': 'DISABLED'},
                 }), \
                 patch.object(app.engine, 'evaluate', return_value={'status': 'NO TRADE'}), \
-                patch.object(app.engine, 'evaluate_scalp', return_value=scalp_signal), \
+                patch.object(app.engine, 'evaluate_scalp') as evaluate_scalp, \
                 patch.object(app, 'run_backtest', return_value={'status': 'INSUFFICIENT HISTORICAL DATA', 'trades': 0}), \
-                patch.object(app, 'run_scalp_backtest', return_value={'status': 'INSUFFICIENT HISTORICAL DATA', 'trades': 0}), \
                 patch.object(app.journal, 'record') as record_signal, \
                 patch.object(app.database, 'save_candles'), \
                 patch.object(app.database, 'save_signal') as save_signal, \
                 patch.object(app.manager, 'update', return_value='WAITING'):
             asyncio.run(app.on_tick(3600, 100.0))
 
-            self.assertEqual(scalp_signal['status'], 'SCALP NO TRADE — BACKTEST FILTER')
-            self.assertNotIn('id', scalp_signal)
-            self.assertNotIn('entry', scalp_signal)
-            record_signal.assert_called()
-            self.assertFalse(SignalJournal.is_signal(scalp_signal))
+            self.assertEqual(app.state['scalp_signal']['status'], 'SCALPING DISABLED — USE MAIN SIGNAL')
+            self.assertIsNone(app.state['scalp_signal']['direction'])
+            self.assertEqual(app.state['scalp_backtest']['status'], 'DISABLED')
+            evaluate_scalp.assert_not_called()
+            record_signal.assert_called_once_with({'status': 'NO TRADE'})
             save_signal.assert_not_called()
+
+    def test_live_entry_is_withheld_without_matching_tradingview_confirmation(self):
+        signal = {
+            'id': 'entry-test',
+            'status': 'ENTRY CONFIRMED',
+            'direction': 'BUY',
+            'score': 80,
+            'setup_timestamp': 1_000,
+            'entry': 100.0,
+            'stop_loss': 99.0,
+            'tp1': 102.0,
+            'tp2': 103.0,
+            'risk_reward': 2.0,
+            'reasons': [],
+        }
+        manager_signals = []
+
+        with patch.object(app, 'store', CandleStore()), \
+                patch.object(app, 'latest_tradingview_alert', None), \
+                patch.object(app, 'last_backtest_candle', None), \
+                patch.object(app, 'last_saved_candles', {}), \
+                patch.dict(app.state, {
+                    'connection': 'LIVE',
+                    'symbol': 'stpRNG',
+                    'backtest': {'status': 'COMPLETE'},
+                }), \
+                patch.object(app, 'backtest_passes', return_value=True), \
+                patch.object(app.engine, 'evaluate', return_value=signal), \
+                patch.object(app.journal, 'record') as record_signal, \
+                patch.object(app.database, 'save_candles'), \
+                patch.object(app.database, 'save_signal'), \
+                patch.object(
+                    app.manager,
+                    'update',
+                    side_effect=lambda candidate, _price: manager_signals.append(candidate.copy()) or 'WAITING',
+                ):
+            asyncio.run(app.on_tick(1_001, 100.0))
+
+        self.assertEqual(manager_signals[0]['status'], 'WAIT — TRADINGVIEW CONFIRMATION REQUIRED')
+        self.assertIsNone(manager_signals[0]['direction'])
+        self.assertNotIn('entry', manager_signals[0])
+        self.assertNotIn('id', manager_signals[0])
+        record_signal.assert_called_once_with(manager_signals[0])
 
     def test_exit_alert_latches_after_trade_manager_resets_and_can_be_acknowledged(self):
         manager = TradeManager()
@@ -355,8 +378,9 @@ class AppFlowTests(unittest.TestCase):
                 patch.object(app, 'manager', manager), \
                 patch.dict(app.state, {'connection': 'LIVE', 'exit_alert': None}), \
                 patch.object(app.engine, 'evaluate', return_value={'status': 'NO TRADE'}), \
-                patch.object(app.engine, 'evaluate_scalp', return_value={'status': 'NO SCALP SIGNAL'}):
+                patch.object(app.engine, 'evaluate_scalp') as evaluate_scalp:
             asyncio.run(app.on_tick(2_000, 111))
+            evaluate_scalp.assert_not_called()
             alert = app.state['exit_alert'].copy()
             self.assertEqual(alert['status'], 'TARGET 1 HIT')
 

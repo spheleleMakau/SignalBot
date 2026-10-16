@@ -10,7 +10,7 @@ MARKET_LABELS = {
     'gold': 'Gold',
 }
 
-DEFAULT_MARKET = 'gold'
+DEFAULT_MARKET = 'step_index'
 
 
 def discover_markets(symbols: list[dict]) -> dict[str, dict[str, str]]:

@@ -19,6 +19,8 @@ class Settings:
     dashboard_auth_required: bool = os.getenv("DASHBOARD_AUTH_REQUIRED", "false").lower() == "true"
     min_signal_score: int = int(os.getenv("MIN_SIGNAL_SCORE", "75"))
     usd_per_price_unit_per_lot: float | None = float(os.getenv("USD_PER_PRICE_UNIT_PER_LOT")) if os.getenv("USD_PER_PRICE_UNIT_PER_LOT") else None
+    tradingview_webhook_token: str = os.getenv("TRADINGVIEW_WEBHOOK_TOKEN", "")
+    tradingview_symbol: str = os.getenv("TRADINGVIEW_SYMBOL", "")
     app_mode: str = os.getenv("APP_MODE", "step_index").lower()
     aviator_signal_url: str = os.getenv("AVIATOR_SIGNAL_URL", "")
 

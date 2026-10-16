@@ -4,7 +4,7 @@ services:
     runtime: python
     plan: starter
     buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
+    startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT --no-access-log
     healthCheckPath: /healthz
     disk:
       name: step-index-data
@@ -28,4 +28,8 @@ services:
       - key: MIN_SIGNAL_SCORE
         value: 75
       - key: USD_PER_PRICE_UNIT_PER_LOT
+        sync: false
+      - key: TRADINGVIEW_WEBHOOK_TOKEN
+        sync: false
+      - key: TRADINGVIEW_SYMBOL
         sync: false

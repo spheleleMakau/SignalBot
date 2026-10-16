@@ -4,8 +4,8 @@ from market.symbols import DEFAULT_MARKET, discover_markets
 
 
 class MarketDiscoveryTests(unittest.TestCase):
-    def test_gold_is_the_default_live_market(self):
-        self.assertEqual(DEFAULT_MARKET, 'gold')
+    def test_step_index_is_the_default_live_market(self):
+        self.assertEqual(DEFAULT_MARKET, 'step_index')
 
     def test_discovers_requested_deriv_markets(self):
         catalog = [

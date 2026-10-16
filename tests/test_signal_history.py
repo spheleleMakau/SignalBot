@@ -37,7 +37,7 @@ class SignalHistoryTests(unittest.TestCase):
                 patch.object(app.database, 'recent_signals', return_value=database_entries) as recent_signals:
             result = app.build_history()
 
-        self.assertEqual({item['id'] for item in result}, {'main-new', 'scalp-new'})
+        self.assertEqual({item['id'] for item in result}, {'main-new'})
         self.assertTrue(all(item['confirmed'] for item in result))
         recent_signals.assert_called_once_with(limit=20, since=now - app.HISTORY_MAX_AGE_SECONDS)
 

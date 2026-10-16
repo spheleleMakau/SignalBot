@@ -10,6 +10,7 @@ from analysis.signal_engine import (
     _live_entry_price,
     _timeframe_alignment,
 )
+from analysis.candle_patterns import breakout_confirmation
 
 
 class SignalAlignmentTests(unittest.TestCase):
@@ -30,6 +31,22 @@ class SignalAlignmentTests(unittest.TestCase):
 
         conflicting = {**self.frames, '4h': {**self.frames['4h'], 'bias': 'BEARISH'}}
         self.assertIsNone(_timeframe_alignment(conflicting))
+
+    def test_breakout_confirmation_requires_a_closed_break_of_previous_extreme(self):
+        candles = pd.DataFrame([
+            {'high': 101.0, 'low': 99.0, 'close': 100.0},
+            {'high': 102.0, 'low': 99.5, 'close': 101.0},
+        ])
+        self.assertFalse(breakout_confirmation(candles, 'BUY'))
+        self.assertFalse(breakout_confirmation(candles, 'SELL'))
+
+        candles.loc[1, 'close'] = 101.1
+        self.assertTrue(breakout_confirmation(candles, 'BUY'))
+        self.assertFalse(breakout_confirmation(candles, 'SELL'))
+
+        candles.loc[1, 'close'] = 98.9
+        self.assertFalse(breakout_confirmation(candles, 'BUY'))
+        self.assertTrue(breakout_confirmation(candles, 'SELL'))
 
     def test_conflicting_four_hour_bias_returns_wait(self):
         frames = {**self.frames, '4h': {**self.frames['4h'], 'bias': 'BEARISH'}}
