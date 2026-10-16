@@ -12,6 +12,7 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 from config import TIMEFRAMES, settings
 from data.database import Database
+from data.shadow import resolve_pending_shadow_candidates
 from market.candles import CandleStore
 from market.websocket import DerivFeed
 from market.symbols import DEFAULT_MARKET, MARKET_LABELS
@@ -196,11 +197,30 @@ async def on_tick(epoch, price):
         last_backtest_candle = backtest_candle
     state['scalp_backtest'] = {'status': 'DISABLED'}
     backtest = state['backtest']
-    if signal.get('status') == 'ENTRY CONFIRMED' and not backtest_passes(backtest):
+    shadow_candidate = signal.copy() if signal.get('status') == 'ENTRY CONFIRMED' else None
+    backtest_confirmed = backtest_passes(backtest) if shadow_candidate else False
+    tradingview_confirmed = tradingview_confirms(shadow_candidate) if shadow_candidate else False
+    if shadow_candidate:
+        if backtest_confirmed and tradingview_confirmed:
+            gate_status = 'ELIGIBLE'
+        elif not backtest_confirmed and not tradingview_confirmed:
+            gate_status = 'BLOCKED_BACKTEST_AND_TRADINGVIEW'
+        elif not backtest_confirmed:
+            gate_status = 'BLOCKED_BACKTEST'
+        else:
+            gate_status = 'BLOCKED_TRADINGVIEW'
+        database.record_shadow_candidate(
+            shadow_candidate,
+            evaluated_at=int(epoch),
+            backtest_passed=backtest_confirmed,
+            tradingview_confirmed=tradingview_confirmed,
+            gate_status=gate_status,
+        )
+    if signal.get('status') == 'ENTRY CONFIRMED' and not backtest_confirmed:
         signal['status'] = 'NO TRADE — BACKTEST FILTER'
         signal['reasons'] = signal.get('reasons', []) + ['Historical validation has not confirmed positive expectancy']
         signal.pop('id', None); signal.pop('entry', None); signal.pop('stop_loss', None); signal.pop('tp1', None); signal.pop('tp2', None); signal.pop('risk_reward', None)
-    if signal.get('status') == 'ENTRY CONFIRMED' and not tradingview_confirms(signal):
+    if signal.get('status') == 'ENTRY CONFIRMED' and not tradingview_confirmed:
         withhold_unconfirmed_entry(signal)
     journal.record(signal)
     active_trade = manager.active.copy() if manager.active else None
@@ -219,6 +239,11 @@ async def on_tick(epoch, price):
         if candles and candles[-1]['timestamp'] != last_saved_candles.get(timeframe):
             database.save_candles(state['symbol'], timeframe, candles[-2:])
             last_saved_candles[timeframe] = candles[-1]['timestamp']
+    resolve_pending_shadow_candidates(
+        database,
+        state.get('symbol'),
+        closed_one_minute.to_dict('records'),
+    )
     if signal.get('id') and signal.get('id') != last_saved_signal:
         database.save_signal(signal); last_saved_signal = signal['id']
 
@@ -227,6 +252,9 @@ async def on_symbol(market_id, symbol, market_name):
 
 def reset_market_state(market_id, symbol, market_name):
     global last_saved_signal, last_backtest_candle, latest_tradingview_alert
+    previous_symbol = state.get('symbol')
+    if previous_symbol and previous_symbol != symbol:
+        database.mark_shadow_candidates_incomplete(previous_symbol, int(time.time()))
     store.clear()
     manager.active = None
     engine.symbol = symbol
@@ -393,6 +421,7 @@ async def api_state(request: Request):
         }
         return payload
     payload = dict(state); payload['candles'] = {tf: list(values)[-120:] for tf, values in store.frames.items()}; payload['history'] = build_history(limit=HISTORY_DETAIL_LIMIT, symbol=state.get('symbol')); payload['app_mode'] = mode
+    payload['shadow_performance'] = database.shadow_performance(symbol=state.get('symbol'))
     payload['trade_values'] = estimate_trade_values(payload.get('signal', {}), settings.usd_per_price_unit_per_lot)
     feed_age = None if not state['last_tick'] else max(0, int(time.time()) - int(state['last_tick']))
     feed_is_fresh = state['connection'] == 'LIVE' and feed_age is not None and feed_age <= 10
@@ -640,7 +669,8 @@ async def acknowledge_exit_alert(request: ExitAlertAcknowledgement):
     return {'acknowledged': False}
 
 @app.get('/api/performance')
-async def api_performance(): return {'status': 'NO LIVE PERFORMANCE DATA' if not database.recent_signals(1) else 'LIVE SIGNAL HISTORY ONLY', 'trades': 0}
+async def api_performance():
+    return database.shadow_performance(symbol=state.get('symbol'))
 
 if __name__ == '__main__':
     import uvicorn

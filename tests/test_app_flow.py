@@ -280,6 +280,7 @@ class AppFlowTests(unittest.TestCase):
                 patch.object(app, 'run_backtest', side_effect=record_backtest), \
                 patch.object(app.database, 'save_candles'), \
                 patch.object(app.database, 'save_signal'), \
+                patch.object(app.database, 'pending_shadow_candidates', return_value=[]), \
                 patch.object(app.manager, 'update', return_value='WAITING'):
             asyncio.run(app.on_tick(249 * 300 + 10, 100.0))
             asyncio.run(app.on_tick(249 * 300 + 11, 100.0))
@@ -310,6 +311,7 @@ class AppFlowTests(unittest.TestCase):
                 patch.object(app.journal, 'record') as record_signal, \
                 patch.object(app.database, 'save_candles'), \
                 patch.object(app.database, 'save_signal') as save_signal, \
+                patch.object(app.database, 'pending_shadow_candidates', return_value=[]), \
                 patch.object(app.manager, 'update', return_value='WAITING'):
             asyncio.run(app.on_tick(3600, 100.0))
 
@@ -347,9 +349,12 @@ class AppFlowTests(unittest.TestCase):
                 }), \
                 patch.object(app, 'backtest_passes', return_value=True), \
                 patch.object(app.engine, 'evaluate', return_value=signal), \
+                patch.object(app.database, 'record_shadow_candidate') as record_shadow, \
+                patch.object(app.database, 'pending_shadow_candidates', return_value=[]), \
                 patch.object(app.journal, 'record') as record_signal, \
                 patch.object(app.database, 'save_candles'), \
                 patch.object(app.database, 'save_signal'), \
+                patch.object(app.database, 'pending_shadow_candidates', return_value=[]), \
                 patch.object(
                     app.manager,
                     'update',
@@ -362,6 +367,8 @@ class AppFlowTests(unittest.TestCase):
         self.assertNotIn('entry', manager_signals[0])
         self.assertNotIn('id', manager_signals[0])
         record_signal.assert_called_once_with(manager_signals[0])
+        record_shadow.assert_called_once()
+        self.assertEqual(record_shadow.call_args.kwargs['gate_status'], 'BLOCKED_TRADINGVIEW')
 
     def test_exit_alert_latches_after_trade_manager_resets_and_can_be_acknowledged(self):
         manager = TradeManager()
@@ -378,7 +385,8 @@ class AppFlowTests(unittest.TestCase):
                 patch.object(app, 'manager', manager), \
                 patch.dict(app.state, {'connection': 'LIVE', 'exit_alert': None}), \
                 patch.object(app.engine, 'evaluate', return_value={'status': 'NO TRADE'}), \
-                patch.object(app.engine, 'evaluate_scalp') as evaluate_scalp:
+                patch.object(app.engine, 'evaluate_scalp') as evaluate_scalp, \
+                patch.object(app.database, 'pending_shadow_candidates', return_value=[]):
             asyncio.run(app.on_tick(2_000, 111))
             evaluate_scalp.assert_not_called()
             alert = app.state['exit_alert'].copy()

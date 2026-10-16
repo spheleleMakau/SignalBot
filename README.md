@@ -39,6 +39,12 @@ Create TradingView alerts from an indicator/strategy that provides the intended 
 
 Use `"SELL"` in the separate sell alert. The webhook rejects wrong tokens, ticker/timeframe mismatches, timestamps outside the freshness window, and timestamps without a UTC timezone. An alert confirms an entry only when its ticker, direction, and candle-open timestamp exactly match the app's candidate signal. TradingView is an additional filter, not a guarantee of accuracy; no strategy can eliminate false signals or guarantee profits. Keep the token private and do not put it in public scripts or source control.
 
+### Shadow outcome tracking
+
+The dashboard's **Shadow Signal Results** panel and `/api/performance` endpoint record each rule-qualified main-entry candidate before the backtest and TradingView gates modify or suppress it. Candidate plans are observed only; the tracker never submits orders. It resolves outcomes using closed 1-minute candles after the candidate's observation minute, tests stop loss versus TP1 (assuming the stop is hit first if both fall within one candle), and marks a candidate at the close after 120 bars if neither level is reached. Feed gaps and market switches are reported as incomplete rather than counted as wins or losses.
+
+Results are gross price-movement R only. The feed does not provide verified bid/ask spread or actual fills, so spread, slippage, execution latency, and commissions are not modeled and the displayed results are not net profitability estimates. Setup-to-observation delay is recorded as a diagnostic. Compare candidates by their recorded backtest/TradingView gate status, and collect a meaningful sample across market conditions before changing rules; small samples are not evidence of reliable accuracy.
+
 Start the application from the project folder:
 
 ```powershell

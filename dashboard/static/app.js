@@ -81,6 +81,53 @@ function ensureSwingVolumePanel() {
   document.querySelector('.lower-grid')?.append(panel);
 }
 
+function ensureShadowPerformancePanel() {
+  if ($('shadow-performance')) return;
+  const panel = document.createElement('section');
+  panel.id = 'shadow-performance';
+  panel.className = 'history shadow-performance';
+  panel.innerHTML = '<div class="panel-heading"><span class="label">SHADOW SIGNAL RESULTS · NO ORDERS</span><span id="shadow-count" class="muted">Waiting for candidate setups</span></div><div class="metrics shadow-metrics"><div><span>RESOLVED</span><b id="shadow-resolved">0</b></div><div><span>WIN RATE</span><b id="shadow-win-rate">--</b></div><div><span>AVERAGE GROSS RESULT</span><b id="shadow-average-r">--</b></div><div><span>GROSS PROFIT FACTOR</span><b id="shadow-profit-factor">--</b></div><div><span>AVG SETUP DELAY</span><b id="shadow-latency">--</b></div></div><p id="shadow-methodology" class="reason">Candidate outcomes are evaluated on future closed 1-minute candles.</p><small id="shadow-cost-model"></small><div id="shadow-gates" class="shadow-gates"></div><div id="shadow-recent" class="shadow-recent"></div>';
+  document.querySelector('main')?.append(panel);
+}
+
+function renderShadowPerformance(performance) {
+  const resolved = performance.resolved || 0;
+  const average = performance.average_gross_r;
+  $('shadow-count').textContent = `${performance.candidates || 0} candidates · ${performance.pending || 0} pending · ${performance.data_gaps || 0} incomplete`;
+  $('shadow-resolved').textContent = resolved;
+  $('shadow-win-rate').textContent = performance.win_rate_percent == null ? '--' : `${Number(performance.win_rate_percent).toFixed(1)}%`;
+  $('shadow-average-r').textContent = average == null ? '--' : `${Number(average) >= 0 ? '+' : ''}${Number(average).toFixed(2)}R`;
+  $('shadow-profit-factor').textContent = performance.gross_profit_factor == null ? '--' : Number(performance.gross_profit_factor).toFixed(2);
+  $('shadow-latency').textContent = performance.average_entry_latency_seconds == null ? '--' : `${Number(performance.average_entry_latency_seconds).toFixed(1)}s`;
+  $('shadow-methodology').textContent = performance.methodology || 'Candidate outcomes are evaluated on future closed 1-minute candles.';
+  $('shadow-cost-model').textContent = performance.cost_model || 'Costs are not modeled. Results are not profitability estimates.';
+
+  const groups = Object.entries(performance.by_gate || {});
+  $('shadow-gates').textContent = groups.length
+    ? `Gate groups: ${groups.map(([name, metrics]) => `${name.replaceAll('_', ' ')} ${metrics.resolved}/${metrics.candidates} resolved, ${metrics.average_gross_r == null ? '--' : `${Number(metrics.average_gross_r).toFixed(2)}R avg`}`).join(' · ')}`
+    : 'Gate comparison will appear after candidate setups are observed.';
+
+  const recent = $('shadow-recent');
+  recent.replaceChildren();
+  (performance.recent || []).slice(0, 10).forEach(item => {
+    const row = document.createElement('div');
+    row.className = 'shadow-row';
+    const values = [
+      new Date(item.timestamp * 1000).toLocaleString(),
+      `${item.direction} · ${item.gate_status.replaceAll('_', ' ')}`,
+      item.outcome.replaceAll('_', ' '),
+      item.gross_r == null ? '--' : `${Number(item.gross_r) >= 0 ? '+' : ''}${Number(item.gross_r).toFixed(2)}R`,
+    ];
+    values.forEach(value => {
+      const cell = document.createElement('span');
+      cell.textContent = value;
+      row.append(cell);
+    });
+    recent.append(row);
+  });
+  if (!recent.childElementCount) recent.textContent = 'No eligible entry candidates recorded yet.';
+}
+
 let selectedTimeframe = '5m';
 let latestRefreshId = 0;
 let pendingMarketId = '';
@@ -208,6 +255,7 @@ document.addEventListener('keydown', enableAutomaticAudio, {once: true});
 
 function paint(data) {
   ensureSwingVolumePanel();
+  ensureShadowPerformancePanel();
   const connection = data.connection.toLowerCase();
   $('connection').className = `connection ${connection}`;
   $('connection').textContent = `* ${data.connection}`;
@@ -256,6 +304,7 @@ function paint(data) {
     return `<div class="indicator-row"><span><b>${label}</b><small>${explanation}</small></span><strong>${fmt(value)}</strong></div>`;
   }).join('') || 'Waiting for enough closed candles.';
   renderHistory(data.history);
+  renderShadowPerformance(data.shadow_performance || {});
   $('scalp-status').textContent = 'DISABLED';
   $('scalp-reason').textContent = 'Rapid scalp entries are disabled. Wait for the validated multi-timeframe main signal; no BUY or SELL scalp alerts will be issued.';
   const today = data.today_trend || {};
@@ -567,6 +616,9 @@ function addResponsiveStyles() {
   const polish = document.createElement('style');
   polish.textContent = 'body{background:radial-gradient(circle at 10% 0,rgba(71,130,119,.16),transparent 30%),radial-gradient(circle at 90% 8%,rgba(246,200,95,.08),transparent 24%),#0b1117;overflow-x:hidden}header{max-width:1480px;padding-top:26px}main{max-width:1480px}.price-panel,.signal-panel,.chart-card,.trade-card,.lower-grid article,.history,.today-card,.scalp-card,.bot-card,.analysis-section{border-radius:12px;box-shadow:0 14px 34px rgba(0,0,0,.18)}.signal{letter-spacing:0}.analysis-card{border-radius:9px;transition:border-color .2s,transform .2s}.analysis-card:hover{border-color:#75e6a2;transform:translateY(-2px)}.analysis-action{padding:5px 8px;border:1px solid currentColor;border-radius:999px}.trade-card{border-color:rgba(117,230,162,.28)}.price-panel{border-color:rgba(246,200,95,.24)}.history-row{border-radius:7px;padding:13px 10px}.signal-modal-panel{border-radius:14px}.plan-levels strong{color:#75e6a2}@media(max-width:800px){main{padding-left:12px;padding-right:12px}.panel-heading{flex-wrap:wrap}.chart-card{padding:14px}.js-plotly-plot .plotly .modebar{transform:scale(.82);transform-origin:top right}.analysis-section,.bot-card,.scalp-card,.today-card{padding:14px}.analysis-grid,.indicator-list{grid-template-columns:1fr}.analysis-values span{font-size:10px}.chart-guide span{font-size:10px}}';
   document.head.appendChild(polish);
+  const shadowStyle = document.createElement('style');
+  shadowStyle.textContent = '.shadow-performance{margin-top:16px}.shadow-metrics{margin:12px 0;grid-template-columns:repeat(auto-fit,minmax(130px,1fr))}.shadow-gates{color:#b7c5ca;font-size:12px;line-height:1.6;overflow-wrap:anywhere}.shadow-recent{margin-top:12px}.shadow-row{display:grid;grid-template-columns:minmax(140px,1fr) minmax(180px,1.4fr) minmax(100px,.7fr) 75px;gap:10px;border-top:1px solid #24333e;padding:10px 0;color:#b7c5ca;font:11px DM Mono,monospace}.shadow-row span:last-child{text-align:right}.shadow-row span{overflow-wrap:anywhere}@media(max-width:800px){.shadow-row{grid-template-columns:1fr auto;gap:5px}.shadow-row span:nth-child(3){text-align:right}.shadow-row span:nth-child(2){grid-row:2}.shadow-row span:nth-child(4){grid-column:2;grid-row:2}}';
+  document.head.appendChild(shadowStyle);
   const scenarioStyle = document.createElement('style');
   scenarioStyle.textContent = '.scenario-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin:14px 0 8px}.scenario-card{min-width:0;background:#0c151c;border:1px solid #24333e;border-left:3px solid #75e6a2;padding:12px}.scenario-card.sell{border-left-color:#ff6b6b}.scenario-card>div{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap}.scenario-card strong{font:600 12px DM Mono,monospace;color:#e9f0f3}.scenario-card b{font:500 10px DM Mono,monospace;color:#75e6a2}.scenario-card.sell b{color:#ff8a8a}.scenario-card p{margin:9px 0 0;color:#b7c5ca;font-size:12px;line-height:1.5;overflow-wrap:anywhere}.scenario-note{display:block;color:#8496a1;font-size:11px;line-height:1.5}@media(max-width:600px){.scenario-grid{grid-template-columns:1fr}}';
   document.head.appendChild(scenarioStyle);
