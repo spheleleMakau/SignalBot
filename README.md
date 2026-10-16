@@ -1,6 +1,44 @@
-# Deriv Market Trader
+# SignalBot
 
-A Python 3 FastAPI dashboard for live Deriv market analysis. Step Index is selected by default; Gold/XAUUSD and other supported Deriv markets can be selected from the dashboard. It builds 1m, 5m, 15m, 1h, and 4h candles from Deriv market data, calculates indicators and structure, and stores candles/signals in SQLite.
+SignalBot is a self-hosted market-analysis and signal-review dashboard for Deriv markets. It combines live quotes, multi-timeframe technical analysis, historical backtest gates, and optional TradingView confirmation to help an operator evaluate setups. Step Index is selected by default; Gold/XAUUSD and other supported Deriv markets can be selected from the dashboard.
+
+## Product overview
+
+- Streams public Deriv market data and builds closed 1m, 5m, 15m, 1h, and 4h candles.
+- Presents technical context, candidate risk levels, signal history, and interactive charts in one dashboard.
+- Requires aligned rule conditions, closed-candle confirmation, historical gates, and (when configured) a matching TradingView alert before showing a confirmed main entry.
+- Adds upcoming scheduled macroeconomic events as Gold-only context; events do not create trade directions.
+- Tracks shadow outcomes without placing orders, allowing users to evaluate rule-qualified candidates against observed market data.
+- Supports a single selected market and a single-process deployment, with optional HTTP Basic authentication for the dashboard.
+
+SignalBot is decision-support software, not an execution platform, broker, investment adviser, or guarantee of trading performance. It does not submit orders. Signals and historical results are not promises of future results; users remain responsible for independent validation, position sizing, and broker-side protections.
+
+## Enterprise readiness status
+
+The current repository is suitable for local evaluation and a controlled, single-instance pilot. **It is not yet an enterprise production offering.** The current deployment uses process-local live state and SQLite; authentication is a shared Basic Auth username/password rather than organization identity. There is no tenant isolation, role-based access control, centralized audit trail, high-availability design, or documented recovery objective.
+
+The selected enterprise packaging direction is a dedicated deployment per customer, not a shared multi-tenant service. Each customer deployment must have separately managed credentials, provider keys, persistent data, backups, and operational access. Repeatable provisioning and lifecycle management for those isolated deployments are not implemented yet.
+
+Before representing or deploying this as an enterprise-ready service, the product needs a scoped design and verification for at least:
+
+- Organization identity integration (such as OIDC/SAML), user lifecycle, and role-based access for customer teams.
+- Repeatable customer-specific provisioning, upgrades, rollback, and decommissioning, including separation of credentials, data, backups, and operational access.
+- Shared production-grade persistence and coordinated live state before running multiple app instances for a customer.
+- Auditable administrative and signal events, with defined retention and export controls.
+- Operational monitoring, alerting, backup/restore drills, availability objectives, and incident procedures.
+- Independent security testing, dependency and vulnerability management, and a secrets-management process.
+- Review of data-provider licensing, commercial use terms, financial-services obligations, and customer contracts.
+- Validated performance reporting that includes spread, slippage, fees, execution delay, representative samples, and clear methodology.
+
+These are product requirements, not claims that SignalBot currently meets them. Enterprise controls should be designed around the target customer, deployment environment, and applicable obligations rather than implied by marketing language.
+
+## Verification
+
+GitHub Actions runs the regression suite on pushes and pull requests. Run it locally with:
+
+```powershell
+.\.venv\Scripts\python.exe -W error::ResourceWarning -m unittest discover -s tests -v
+```
 
 ## Important data policy
 
@@ -64,6 +102,8 @@ Run the regression tests with `.\.venv\Scripts\python.exe -W error::ResourceWarn
 ## Deploy To Render
 
 The repository includes `render.yaml`. Render uses Python 3.13.4, installs `requirements.txt`, starts Uvicorn on its assigned port, checks `/healthz`, and stores SQLite data on a persistent 1 GB disk mounted at `/var/data`. The blueprint uses Render's paid `starter` web-service plan because persistent disks are not available on free web services. Without persistent storage, deploys/restarts can erase the signal history.
+
+The application refuses to start on a non-loopback `HOST` unless `DASHBOARD_AUTH_REQUIRED=true`; when enabled, both dashboard credentials must be set. This is a basic deployment safety guard, not enterprise identity management.
 
 1. Push this project to the GitHub repository. From PowerShell in the project folder, run:
 

@@ -10,7 +10,7 @@ from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
-from config import TIMEFRAMES, settings
+from config import TIMEFRAMES, settings, validate_deployment_security
 from data.database import Database
 from data.shadow import resolve_pending_shadow_candidates
 from market.candles import CandleStore
@@ -23,8 +23,7 @@ from backtest.engine import run_backtest
 from trading.risk import estimate_trade_values
 from trading.trade_manager import TradeManager
 
-if settings.dashboard_auth_required and not (settings.dashboard_username and settings.dashboard_password):
-    raise RuntimeError('DASHBOARD_USERNAME and DASHBOARD_PASSWORD are required when dashboard authentication is enabled.')
+validate_deployment_security(settings)
 
 BASE_DIR = Path(__file__).resolve().parent
 database_path = Path(settings.database_path)
@@ -166,15 +165,23 @@ def tradingview_symbol_for_market(market_id: str | None = None) -> str:
     return ''
 
 
-def withhold_unconfirmed_entry(signal: dict) -> None:
+def withhold_entry(signal: dict, status: str, reason: str) -> None:
     signal.update({
-        'status': 'WAIT — TRADINGVIEW CONFIRMATION REQUIRED',
+        'status': status,
         'direction': None,
         'score': 0,
-        'reasons': ['Entry withheld: no matching TradingView alert for this exact 1-minute candle, ticker, and direction.'],
+        'reasons': [reason],
     })
     for key in ('id', 'entry', 'stop_loss', 'tp1', 'tp2', 'risk_reward', 'setup_timestamp'):
         signal.pop(key, None)
+
+
+def withhold_unconfirmed_entry(signal: dict) -> None:
+    withhold_entry(
+        signal,
+        'WAIT — TRADINGVIEW CONFIRMATION REQUIRED',
+        'Entry withheld: no matching TradingView alert for this exact 1-minute candle, ticker, and direction.',
+    )
 
 
 async def on_status(status):
@@ -238,9 +245,11 @@ async def on_tick(epoch, price):
             gate_status=gate_status,
         )
     if signal.get('status') == 'ENTRY CONFIRMED' and not backtest_confirmed:
-        signal['status'] = 'NO TRADE — BACKTEST FILTER'
-        signal['reasons'] = signal.get('reasons', []) + ['Historical validation has not confirmed positive expectancy']
-        signal.pop('id', None); signal.pop('entry', None); signal.pop('stop_loss', None); signal.pop('tp1', None); signal.pop('tp2', None); signal.pop('risk_reward', None)
+        withhold_entry(
+            signal,
+            'NO TRADE — BACKTEST FILTER',
+            'Entry withheld: historical validation is unavailable or did not pass the minimum sample and expectancy checks.',
+        )
     if signal.get('status') == 'ENTRY CONFIRMED' and not tradingview_confirmed:
         withhold_unconfirmed_entry(signal)
     journal.record(signal)

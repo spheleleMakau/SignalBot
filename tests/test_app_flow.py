@@ -191,6 +191,32 @@ class AppFlowTests(unittest.TestCase):
             'BLOCKED · EXPECTANCY NOT POSITIVE',
         )
 
+    def test_withheld_entry_has_no_direction_or_actionable_trade_plan(self):
+        candidate = {
+            'id': 'candidate',
+            'status': 'ENTRY CONFIRMED',
+            'direction': 'BUY',
+            'score': 90,
+            'setup_timestamp': 1_000,
+            'entry': 100.0,
+            'stop_loss': 99.0,
+            'tp1': 102.0,
+            'tp2': 103.0,
+            'risk_reward': 2.0,
+        }
+
+        app.withhold_entry(
+            candidate,
+            'NO TRADE — BACKTEST FILTER',
+            'Entry withheld: historical validation did not pass.',
+        )
+
+        self.assertEqual(candidate['status'], 'NO TRADE — BACKTEST FILTER')
+        self.assertIsNone(candidate['direction'])
+        self.assertEqual(candidate['score'], 0)
+        for key in ('id', 'entry', 'stop_loss', 'tp1', 'tp2', 'risk_reward', 'setup_timestamp'):
+            self.assertNotIn(key, candidate)
+
     def test_market_switch_is_rejected_while_a_trade_is_active(self):
         from fastapi import HTTPException
         from app import MarketSelection, select_market
