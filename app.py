@@ -16,6 +16,7 @@ from data.shadow import resolve_pending_shadow_candidates
 from market.candles import CandleStore
 from market.websocket import DerivFeed
 from market.symbols import DEFAULT_MARKET, MARKET_LABELS
+from news.calendar import CALENDAR_REFRESH_SECONDS, CALENDAR_RETRY_SECONDS, TradingEconomicsCalendar
 from analysis.signal_engine import SignalEngine
 from analysis.signal_journal import SignalJournal
 from backtest.engine import run_backtest
@@ -38,6 +39,16 @@ SCALPING_DISABLED = {
 }
 TRADINGVIEW_ALERT_MAX_AGE_SECONDS = 125
 latest_tradingview_alert = None
+gold_news_calendar = TradingEconomicsCalendar(settings.trading_economics_api_key)
+gold_news_state = {
+    'status': 'NOT CONFIGURED' if not settings.trading_economics_api_key else 'WAITING',
+    'provider': 'Trading Economics',
+    'updated_at': None,
+    'stale': False,
+    'message': 'Set TRADING_ECONOMICS_API_KEY to enable the Gold economic calendar.',
+    'timezone': 'UTC',
+    'events': [],
+}
 state = {'connection': 'OFFLINE', 'last_tick': None, 'price': None, 'symbol': None, 'market_id': DEFAULT_MARKET, 'market_name': MARKET_LABELS[DEFAULT_MARKET], 'signal': {'status': 'NO LIVE DATA — NO SIGNAL', 'reasons': ['Waiting for a fresh live tick before evaluating an entry.']}, 'scalp_signal': dict(SCALPING_DISABLED), 'trade_status': 'WAITING', 'exit_alert': None, 'backtest': {'status': 'WAITING FOR DATA'}, 'scalp_backtest': {'status': 'DISABLED'}, 'app_mode': settings.app_mode}; feed_task = None; feed = None; last_saved_signal = None; last_backtest_candle = None; last_saved_candles = {}
 HISTORY_LIMIT = 20
 HISTORY_DETAIL_LIMIT = 50
@@ -129,20 +140,30 @@ def backtest_gate_status(backtest: dict) -> str:
 
 
 def tradingview_confirms(signal: dict, now: int | None = None) -> bool:
-    if not settings.tradingview_symbol or not settings.tradingview_webhook_token or not latest_tradingview_alert:
+    expected_symbol = tradingview_symbol_for_market()
+    if not expected_symbol or not settings.tradingview_webhook_token or not latest_tradingview_alert:
         return False
     moment = int(time.time()) if now is None else now
     alert = latest_tradingview_alert
     age = moment - int(alert['bar_timestamp'])
     received_age = moment - int(alert['received_at'])
     return (
-        alert['ticker'] == settings.tradingview_symbol
+        alert['ticker'] == expected_symbol
         and alert['direction'] == signal.get('direction')
         and alert['timeframe'] == '1'
         and alert['bar_timestamp'] == signal.get('setup_timestamp')
         and 0 <= received_age <= TRADINGVIEW_ALERT_MAX_AGE_SECONDS
         and -5 <= age <= TRADINGVIEW_ALERT_MAX_AGE_SECONDS
     )
+
+
+def tradingview_symbol_for_market(market_id: str | None = None) -> str:
+    selected_market = market_id or state.get('market_id', DEFAULT_MARKET)
+    if selected_market == 'step_index':
+        return settings.tradingview_symbol
+    if selected_market == 'gold':
+        return settings.tradingview_gold_symbol
+    return ''
 
 
 def withhold_unconfirmed_entry(signal: dict) -> None:
@@ -247,6 +268,15 @@ async def on_tick(epoch, price):
     if signal.get('id') and signal.get('id') != last_saved_signal:
         database.save_signal(signal); last_saved_signal = signal['id']
 
+
+async def refresh_gold_news():
+    global gold_news_state
+    while True:
+        gold_news_state = await gold_news_calendar.refresh()
+        delay = CALENDAR_REFRESH_SECONDS if gold_news_state['status'] == 'LIVE' else CALENDAR_RETRY_SECONDS
+        await asyncio.sleep(delay)
+
+
 async def on_symbol(market_id, symbol, market_name):
     reset_market_state(market_id, symbol, market_name)
 
@@ -282,9 +312,17 @@ def reset_market_state(market_id, symbol, market_name):
 @asynccontextmanager
 async def lifespan(app):
     global feed, feed_task
-    feed = DerivFeed(store, on_tick, on_status, on_symbol); feed_task = asyncio.create_task(feed.run())
+    feed = DerivFeed(store, on_tick, on_status, on_symbol)
+    feed_task = asyncio.create_task(feed.run())
+    news_task = asyncio.create_task(refresh_gold_news()) if settings.trading_economics_api_key else None
     yield
-    feed.running = False; feed_task.cancel(); await asyncio.gather(feed_task, return_exceptions=True)
+    feed.running = False
+    feed_task.cancel()
+    tasks = [feed_task]
+    if news_task:
+        news_task.cancel()
+        tasks.append(news_task)
+    await asyncio.gather(*tasks, return_exceptions=True)
 
 app = FastAPI(title='Step Index Trader', lifespan=lifespan)
 app.mount('/static', StaticFiles(directory=BASE_DIR / 'dashboard' / 'static'), name='static'); templates = Jinja2Templates(directory=BASE_DIR / 'dashboard' / 'templates')
@@ -329,11 +367,12 @@ class TradingViewWebhookAlert(BaseModel):
 @app.post('/api/tradingview/webhook/{webhook_token}')
 async def tradingview_webhook(webhook_token: str, alert: TradingViewWebhookAlert):
     global latest_tradingview_alert
-    if not settings.tradingview_webhook_token or not settings.tradingview_symbol:
-        raise HTTPException(status_code=503, detail='TradingView confirmation is not configured')
+    expected_symbol = tradingview_symbol_for_market()
+    if not settings.tradingview_webhook_token or not expected_symbol:
+        raise HTTPException(status_code=503, detail='TradingView confirmation is not configured for the selected market')
     if not hmac.compare_digest(webhook_token, settings.tradingview_webhook_token):
         raise HTTPException(status_code=401, detail='Invalid TradingView webhook token')
-    if not hmac.compare_digest(alert.ticker, settings.tradingview_symbol):
+    if not hmac.compare_digest(alert.ticker, expected_symbol):
         raise HTTPException(status_code=422, detail='TradingView ticker does not match the configured market')
     if alert.timeframe != '1':
         raise HTTPException(status_code=422, detail='Only confirmed 1-minute TradingView alerts are accepted')
@@ -362,6 +401,12 @@ async def tradingview_webhook(webhook_token: str, alert: TradingViewWebhookAlert
 @app.get('/healthz')
 async def health_check():
     return {'status': 'ok', 'service': 'step-index-trader'}
+
+
+@app.get('/api/news/gold')
+async def api_gold_news():
+    return dict(gold_news_state)
+
 
 @app.get('/api/markets')
 async def api_markets():
@@ -422,12 +467,13 @@ async def api_state(request: Request):
         return payload
     payload = dict(state); payload['candles'] = {tf: list(values)[-120:] for tf, values in store.frames.items()}; payload['history'] = build_history(limit=HISTORY_DETAIL_LIMIT, symbol=state.get('symbol')); payload['app_mode'] = mode
     payload['shadow_performance'] = database.shadow_performance(symbol=state.get('symbol'))
+    payload['gold_news'] = dict(gold_news_state)
     payload['trade_values'] = estimate_trade_values(payload.get('signal', {}), settings.usd_per_price_unit_per_lot)
     feed_age = None if not state['last_tick'] else max(0, int(time.time()) - int(state['last_tick']))
     feed_is_fresh = state['connection'] == 'LIVE' and feed_age is not None and feed_age <= 10
     payload['timeframe_analysis'] = build_timeframe_analysis(store, state['last_tick'], feed_is_fresh)
     backtest = state.get('backtest') or {}
-    tv_configured = bool(settings.tradingview_symbol and settings.tradingview_webhook_token)
+    tv_configured = bool(tradingview_symbol_for_market() and settings.tradingview_webhook_token)
     payload['bot'] = {'mode': 'ALERT_ONLY', 'orders_enabled': False, 'feed_age_seconds': feed_age, 'feed_quality': 'LIVE' if state['connection'] == 'LIVE' and feed_age is not None and feed_age <= 10 else 'STALE', 'risk_guard': 'ACTIVE', 'backtest_status': backtest_gate_status(backtest), 'backtest_trades': backtest.get('trades', 0), 'backtest_profit_factor': backtest.get('profit_factor'), 'backtest_validation_trades': backtest.get('validation_trades', 0), 'backtest_validation_profit_factor': backtest.get('validation_profit_factor'), 'scalp_backtest_status': 'DISABLED', 'tradingview_confirmation': 'CONFIGURED · WAITING FOR MATCH' if tv_configured else 'NOT CONFIGURED · ENTRIES BLOCKED', 'execution_note': 'No orders are placed by this application. Scalping is disabled.'}
     today = datetime.now(timezone.utc).date()
     candles = [candle for candle in store.snapshot()['5m'] if datetime.fromtimestamp(candle['timestamp'], timezone.utc).date() == today]

@@ -90,6 +90,81 @@ function ensureShadowPerformancePanel() {
   document.querySelector('main')?.append(panel);
 }
 
+function ensureGoldNewsPanel() {
+  if ($('gold-news-panel')) return;
+  const panel = document.createElement('section');
+  panel.id = 'gold-news-panel';
+  panel.className = 'history gold-news-panel';
+  panel.innerHTML = '<div class="panel-heading"><span class="label">GOLD · UPCOMING ECONOMIC EVENTS</span><span id="gold-news-status" class="muted">WAITING FOR CALENDAR</span></div><p id="gold-news-note" class="reason">Economic calendar events are context, not directional trade signals.</p><div id="gold-news-events" class="gold-news-events"></div><small>Trading Economics calendar · major scheduled events only · event times shown in your browser timezone. No calendar can predict the market reaction.</small>';
+  document.querySelector('main')?.append(panel);
+}
+
+function renderGoldNews(news, marketId) {
+  const panel = $('gold-news-panel');
+  panel.hidden = marketId !== 'gold';
+  if (marketId !== 'gold') return;
+
+  const stale = news.stale ? ' · STALE DATA' : '';
+  const updatedAt = news.updated_at ? ` · UPDATED ${new Date(news.updated_at * 1000).toLocaleTimeString()}` : '';
+  $('gold-news-status').textContent = `${news.status || 'WAITING'}${stale}${updatedAt}`;
+  $('gold-news-note').textContent = news.message || 'Economic calendar events are context, not directional trade signals.';
+  const list = $('gold-news-events');
+  list.replaceChildren();
+  const upcomingEvents = (news.events || []).filter(event => new Date(event.time).getTime() >= Date.now());
+  upcomingEvents.slice(0, 12).forEach(event => {
+    const row = document.createElement('article');
+    row.className = 'gold-news-row';
+    const eventDate = new Date(event.time);
+    const when = document.createElement('time');
+    when.dateTime = event.time;
+    when.textContent = Number.isNaN(eventDate.getTime()) ? 'TIME UNAVAILABLE' : eventDate.toLocaleString();
+
+    const headline = document.createElement('strong');
+    headline.textContent = event.event || 'Scheduled event';
+    const meta = document.createElement('span');
+    const impact = Number(event.importance) >= 3 ? 'HIGH' : 'MEDIUM';
+    const minutesUntil = Math.ceil((eventDate.getTime() - Date.now()) / 60000);
+    const timing = minutesUntil <= 30
+      ? ` · IN ${minutesUntil} MIN · VOLATILITY MAY RISE`
+      : '';
+    meta.textContent = `${event.country || 'Global'} · ${impact} importance${timing}`;
+    const values = document.createElement('span');
+    const forecast = event.forecast == null || event.forecast === '' ? 'not provided' : event.forecast;
+    const previous = event.previous == null || event.previous === '' ? 'not provided' : event.previous;
+    values.textContent = `Forecast: ${forecast} · Previous: ${previous}`;
+
+    const title = document.createElement('div');
+    title.className = 'gold-news-title';
+    title.append(headline, meta);
+    row.append(when, title, values);
+    if (typeof event.source_url === 'string') {
+      try {
+        const sourceUrl = new URL(event.source_url);
+        if (sourceUrl.protocol === 'https:') {
+          const source = document.createElement('a');
+          source.href = sourceUrl.href;
+          source.target = '_blank';
+          source.rel = 'noopener noreferrer';
+          source.textContent = event.source || 'Source';
+          row.append(source);
+        }
+      } catch (error) {
+        // Ignore invalid external source links and keep the calendar event visible.
+      }
+    }
+    list.append(row);
+  });
+  if (!list.childElementCount) {
+    if (news.status === 'LIVE') {
+      list.textContent = 'No upcoming medium- or high-importance events in the next seven days.';
+    } else if (news.status === 'NOT CONFIGURED') {
+      list.textContent = 'Add a Trading Economics API key in the private environment settings to load events.';
+    } else {
+      list.textContent = 'Upcoming events are currently unavailable from the calendar source.';
+    }
+  }
+}
+
 function renderShadowPerformance(performance) {
   const resolved = performance.resolved || 0;
   const average = performance.average_gross_r;
@@ -256,6 +331,7 @@ document.addEventListener('keydown', enableAutomaticAudio, {once: true});
 function paint(data) {
   ensureSwingVolumePanel();
   ensureShadowPerformancePanel();
+  ensureGoldNewsPanel();
   const connection = data.connection.toLowerCase();
   $('connection').className = `connection ${connection}`;
   $('connection').textContent = `* ${data.connection}`;
@@ -305,6 +381,7 @@ function paint(data) {
   }).join('') || 'Waiting for enough closed candles.';
   renderHistory(data.history);
   renderShadowPerformance(data.shadow_performance || {});
+  renderGoldNews(data.gold_news || {}, data.market_id);
   $('scalp-status').textContent = 'DISABLED';
   $('scalp-reason').textContent = 'Rapid scalp entries are disabled. Wait for the validated multi-timeframe main signal; no BUY or SELL scalp alerts will be issued.';
   const today = data.today_trend || {};
@@ -619,6 +696,9 @@ function addResponsiveStyles() {
   const shadowStyle = document.createElement('style');
   shadowStyle.textContent = '.shadow-performance{margin-top:16px}.shadow-metrics{margin:12px 0;grid-template-columns:repeat(auto-fit,minmax(130px,1fr))}.shadow-gates{color:#b7c5ca;font-size:12px;line-height:1.6;overflow-wrap:anywhere}.shadow-recent{margin-top:12px}.shadow-row{display:grid;grid-template-columns:minmax(140px,1fr) minmax(180px,1.4fr) minmax(100px,.7fr) 75px;gap:10px;border-top:1px solid #24333e;padding:10px 0;color:#b7c5ca;font:11px DM Mono,monospace}.shadow-row span:last-child{text-align:right}.shadow-row span{overflow-wrap:anywhere}@media(max-width:800px){.shadow-row{grid-template-columns:1fr auto;gap:5px}.shadow-row span:nth-child(3){text-align:right}.shadow-row span:nth-child(2){grid-row:2}.shadow-row span:nth-child(4){grid-column:2;grid-row:2}}';
   document.head.appendChild(shadowStyle);
+  const newsStyle = document.createElement('style');
+  newsStyle.textContent = '.gold-news-panel{margin-top:16px}.gold-news-panel[hidden]{display:none}.gold-news-events{display:grid;gap:8px}.gold-news-row{display:grid;grid-template-columns:minmax(170px,.8fr) minmax(220px,1.3fr) minmax(180px,1fr) minmax(100px,.5fr);gap:10px;align-items:center;border-top:1px solid #24333e;padding:12px 0;color:#b7c5ca;font:11px DM Mono,monospace}.gold-news-title{display:grid;gap:5px}.gold-news-title strong{color:#e9f0f3;font-size:12px}.gold-news-title span,.gold-news-row a{color:#8496a1}.gold-news-row a{overflow-wrap:anywhere}@media(max-width:800px){.gold-news-row{grid-template-columns:1fr;gap:7px}.gold-news-title,.gold-news-row>span,.gold-news-row a{grid-column:auto;grid-row:auto}}';
+  document.head.appendChild(newsStyle);
   const scenarioStyle = document.createElement('style');
   scenarioStyle.textContent = '.scenario-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin:14px 0 8px}.scenario-card{min-width:0;background:#0c151c;border:1px solid #24333e;border-left:3px solid #75e6a2;padding:12px}.scenario-card.sell{border-left-color:#ff6b6b}.scenario-card>div{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap}.scenario-card strong{font:600 12px DM Mono,monospace;color:#e9f0f3}.scenario-card b{font:500 10px DM Mono,monospace;color:#75e6a2}.scenario-card.sell b{color:#ff8a8a}.scenario-card p{margin:9px 0 0;color:#b7c5ca;font-size:12px;line-height:1.5;overflow-wrap:anywhere}.scenario-note{display:block;color:#8496a1;font-size:11px;line-height:1.5}@media(max-width:600px){.scenario-grid{grid-template-columns:1fr}}';
   document.head.appendChild(scenarioStyle);

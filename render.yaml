@@ -33,3 +33,7 @@ services:
         sync: false
       - key: TRADINGVIEW_SYMBOL
         sync: false
+      - key: TRADINGVIEW_GOLD_SYMBOL
+        sync: false
+      - key: TRADING_ECONOMICS_API_KEY
+        sync: false

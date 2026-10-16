@@ -21,6 +21,8 @@ class Settings:
     usd_per_price_unit_per_lot: float | None = float(os.getenv("USD_PER_PRICE_UNIT_PER_LOT")) if os.getenv("USD_PER_PRICE_UNIT_PER_LOT") else None
     tradingview_webhook_token: str = os.getenv("TRADINGVIEW_WEBHOOK_TOKEN", "")
     tradingview_symbol: str = os.getenv("TRADINGVIEW_SYMBOL", "")
+    tradingview_gold_symbol: str = os.getenv("TRADINGVIEW_GOLD_SYMBOL", "")
+    trading_economics_api_key: str = os.getenv("TRADING_ECONOMICS_API_KEY", "")
     app_mode: str = os.getenv("APP_MODE", "step_index").lower()
     aviator_signal_url: str = os.getenv("AVIATOR_SIGNAL_URL", "")
 

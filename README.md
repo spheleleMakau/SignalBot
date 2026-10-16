@@ -24,7 +24,7 @@ The dashboard uses Deriv's unauthenticated public market-data WebSocket. It disc
 
 ### TradingView confirmation
 
-To enable main entries, set `TRADINGVIEW_SYMBOL` to the exact ticker shown in the TradingView chart header and set `TRADINGVIEW_WEBHOOK_TOKEN` to a long random secret. Verify that the TradingView feed represents the same Step Index instrument as the Deriv feed; this app cannot infer or verify broker-to-TradingView symbol equivalence. If no exact matching TradingView feed is available, leave these values unset and the app will keep entries blocked.
+To enable Step Index main entries, set `TRADINGVIEW_SYMBOL` to the exact ticker shown in the TradingView chart header. For Gold, set `TRADINGVIEW_GOLD_SYMBOL` to Gold's exact chart ticker. Set `TRADINGVIEW_WEBHOOK_TOKEN` to a long random secret. Verify each TradingView feed represents the same instrument as the selected Deriv market; this app cannot infer or verify broker-to-TradingView symbol equivalence. If no exact matching feed is available, leave that market's symbol unset and its entries remain blocked.
 
 Create TradingView alerts from an indicator/strategy that provides the intended matching BUY or SELL confirmation. Use a one-minute chart and trigger only once the bar is closed. Configure the webhook URL as `https://<your-host>/api/tradingview/webhook/<your-token>` and send JSON matching this shape (create a corresponding alert for each direction):
 
@@ -38,6 +38,12 @@ Create TradingView alerts from an indicator/strategy that provides the intended 
 ```
 
 Use `"SELL"` in the separate sell alert. The webhook rejects wrong tokens, ticker/timeframe mismatches, timestamps outside the freshness window, and timestamps without a UTC timezone. An alert confirms an entry only when its ticker, direction, and candle-open timestamp exactly match the app's candidate signal. TradingView is an additional filter, not a guarantee of accuracy; no strategy can eliminate false signals or guarantee profits. Keep the token private and do not put it in public scripts or source control.
+
+### Gold economic calendar
+
+The Gold panel can show upcoming medium- and high-importance scheduled economic events aggregated by Trading Economics for the United States, China, Euro Area, United Kingdom, and Japan. Configure `TRADING_ECONOMICS_API_KEY` in `.env` locally or as a private Render environment variable. The dashboard refreshes the calendar every 15 minutes, retries source errors after one minute, and labels cached data stale when refresh fails. The calendar endpoint and key requirements are documented by [Trading Economics](https://docs.tradingeconomics.com/economic_calendar/country/).
+
+This is a scheduled macroeconomic calendar, not a complete breaking-news feed. Event times are interpreted as UTC when the provider omits a timezone and displayed in the browser's local timezone. The panel is shown only while Gold is selected; it is not applied to synthetic Step Index. Economic releases can cause volatility in either direction and are not used to invent a BUY/SELL forecast or bypass technical signal, backtest, or TradingView checks. The market selector continues to analyze one selected market at a time.
 
 ### Shadow outcome tracking
 

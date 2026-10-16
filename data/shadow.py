@@ -81,7 +81,9 @@ def resolve_shadow_outcome(
     return None
 
 
-def resolve_pending_shadow_candidates(database, symbol: str, closed_candles: list[dict[str, Any]]) -> None:
+def resolve_pending_shadow_candidates(database, symbol: str | None, closed_candles: list[dict[str, Any]]) -> None:
+    if not symbol or not closed_candles:
+        return
     for candidate in database.pending_shadow_candidates(symbol):
         outcome = resolve_shadow_outcome(candidate, closed_candles)
         if outcome is not None:

@@ -354,7 +354,6 @@ class AppFlowTests(unittest.TestCase):
                 patch.object(app.journal, 'record') as record_signal, \
                 patch.object(app.database, 'save_candles'), \
                 patch.object(app.database, 'save_signal'), \
-                patch.object(app.database, 'pending_shadow_candidates', return_value=[]), \
                 patch.object(
                     app.manager,
                     'update',
