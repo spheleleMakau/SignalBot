@@ -160,19 +160,21 @@ class SignalEngine:
                 'reasons': ['Wait for a fresh 1-minute close and a live price near its signal level.'],
             })
             return base
-        sr = levels(one_minute, structure); base['levels'] = sr; latest = one_minute.iloc[-1]; base['indicators'] = {key: float(latest[key]) for key in ('ema_20','ema_50','ema_200','rsi_14','atr_14') if latest[key] == latest[key]}
+        sr = levels(one_minute, structure); base['levels'] = sr; latest = one_minute.iloc[-1]; base['indicators'] = {key: float(latest[key]) for key in ('ema_20','ema_50','ema_200','rsi_14','atr_14','supertrend_confluence','flow_direction','efficiency_ratio_10','t3_8','trend_confluence') if key in latest and latest[key] == latest[key]}
         setup_frame = frames['5m']['frame']
         if len(setup_frame) < 2:
             base['status'] = 'NO TRADE — WAITING FOR 5M SETUP'
             return base
         setup_candle = setup_frame.iloc[-1]
         setup_previous = setup_frame.iloc[-2]
+        buy_trend_confluence = latest.get('trend_confluence', 0) == 1 and setup_candle.get('trend_confluence', 0) == 1
+        sell_trend_confluence = latest.get('trend_confluence', 0) == -1 and setup_candle.get('trend_confluence', 0) == -1
         buy_ema_alignment = all((latest[key] == latest[key]) for key in ('ema_20', 'ema_50', 'ema_200')) and latest.close > latest.ema_20 > latest.ema_50 > latest.ema_200 and setup_candle.close > setup_candle.ema_20 > setup_candle.ema_50 > setup_candle.ema_200 and setup_candle.ema_20 > setup_previous.ema_20
         sell_ema_alignment = all((latest[key] == latest[key]) for key in ('ema_20', 'ema_50', 'ema_200')) and latest.close < latest.ema_20 < latest.ema_50 < latest.ema_200 and setup_candle.close < setup_candle.ema_20 < setup_candle.ema_50 < setup_candle.ema_200 and setup_candle.ema_20 < setup_previous.ema_20
         rsi_momentum = (45 < latest.rsi_14 < 70) if higher == 'BULLISH' else (30 < latest.rsi_14 < 55) if higher == 'BEARISH' else False
         not_chasing = abs(current - latest.ema_20) <= atr * 1.5 if latest.ema_20 == latest.ema_20 else False
         follow_through = breakout_confirmation(one_minute, aligned_direction)
-        direction = 'BUY' if aligned_direction == 'BUY' and higher == 'BULLISH' and setup == 'BULLISH' and structure['bias'] == 'BULLISH' and confirmation['direction'] == 'BUY' and follow_through and buy_ema_alignment and rsi_momentum and not_chasing else 'SELL' if aligned_direction == 'SELL' and higher == 'BEARISH' and setup == 'BEARISH' and structure['bias'] == 'BEARISH' and confirmation['direction'] == 'SELL' and follow_through and sell_ema_alignment and rsi_momentum and not_chasing else None
+        direction = 'BUY' if aligned_direction == 'BUY' and higher == 'BULLISH' and setup == 'BULLISH' and structure['bias'] == 'BULLISH' and confirmation['direction'] == 'BUY' and follow_through and buy_ema_alignment and buy_trend_confluence and rsi_momentum and not_chasing else 'SELL' if aligned_direction == 'SELL' and higher == 'BEARISH' and setup == 'BEARISH' and structure['bias'] == 'BEARISH' and confirmation['direction'] == 'SELL' and follow_through and sell_ema_alignment and sell_trend_confluence and rsi_momentum and not_chasing else None
         score = 0; reasons = []
         if direction:
             score += 20; reasons.append('Higher-timeframe direction and 15M structure align'); score += 20; reasons.append('Market structure confirms direction')
@@ -182,6 +184,7 @@ class SignalEngine:
             if momentum_ok: score += 15; reasons.append('RSI momentum confirms without chasing an extreme')
             score += 10; reasons.append(', '.join(confirmation['patterns']))
             score += 10; reasons.append('1M confirmation agrees with all higher timeframes')
+            score += 10; reasons.append('Triple SuperTrend and efficient T3 flow align on 1M and 5M')
             risk = atr * 1.25; swing = min((x['price'] for x in sr if x['type'] == 'support' and x['price'] < current), default=current-risk) if direction == 'BUY' else max((x['price'] for x in sr if x['type'] == 'resistance' and x['price'] > current), default=current+risk)
             stop = min(swing - atr * .25, current-risk) if direction == 'BUY' else max(swing + atr * .25, current+risk)
             unit_risk = abs(current-stop); targets = sorted([x['price'] for x in sr if (x['price'] > current if direction == 'BUY' else x['price'] < current)], reverse=direction == 'SELL')

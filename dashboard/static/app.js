@@ -437,10 +437,18 @@ function paint(data) {
     ema_200: ['Long trend line', 'Shows the bigger, slower trend.'],
     rsi_14: ['Buying/selling push · 0-100', 'Shows which side pushed more recently; it cannot predict the next move.'],
     atr_14: ['Usual 1-minute move', 'Recent move size; it helps set stop distance, not direction.'],
+    supertrend_confluence: ['Triple SuperTrend', '1 = bullish, -1 = bearish, 0 = mixed; all three volatility-based stops must agree.'],
+    flow_direction: ['T3 flow direction', '1 = rising T3, -1 = falling T3; 0 means price efficiency is too low or direction is unclear.'],
+    efficiency_ratio_10: ['10-bar price efficiency', 'Higher values indicate more directional movement; sideways movement is filtered below 0.20.'],
+    t3_8: ['T3 moving average', 'A smoothed trend line; the T3 slope helps confirm directional flow.'],
+    trend_confluence: ['Trend confluence', '1 = bullish, -1 = bearish, 0 = filters do not agree. Both 1M and 5M must align.'],
   };
   $('indicators').innerHTML = Object.entries(indicators).map(([key, value]) => {
     const [label, explanation] = indicatorGuide[key] || [plainReason(key), ''];
-    return `<div class="indicator-row"><span><b>${label}</b><small>${explanation}</small></span><strong>${fmt(value)}</strong></div>`;
+    const displayValue = ['supertrend_confluence', 'flow_direction', 'trend_confluence'].includes(key)
+      ? (value > 0 ? 'BULLISH' : value < 0 ? 'BEARISH' : 'MIXED / WAIT')
+      : fmt(value);
+    return `<div class="indicator-row"><span><b>${label}</b><small>${explanation}</small></span><strong>${displayValue}</strong></div>`;
   }).join('') || 'Waiting for enough closed candles.';
   renderHistory(data.history);
   renderShadowPerformance(data.shadow_performance || {});

@@ -102,6 +102,8 @@ def run_backtest(one_minute: pd.DataFrame, five_minute: pd.DataFrame | None = No
             and current.close > current.ema_20 > current.ema_50 > current.ema_200
             and setup.close > setup.ema_20 > setup.ema_50 > setup.ema_200
             and setup.ema_20 > setup_previous.ema_20
+            and current.trend_confluence == 1
+            and setup.trend_confluence == 1
             and 45 < rsi < 70
             and abs(float(current.close) - float(current.ema_20)) <= atr * 1.5
         )
@@ -116,6 +118,8 @@ def run_backtest(one_minute: pd.DataFrame, five_minute: pd.DataFrame | None = No
             and current.close < current.ema_20 < current.ema_50 < current.ema_200
             and setup.close < setup.ema_20 < setup.ema_50 < setup.ema_200
             and setup.ema_20 < setup_previous.ema_20
+            and current.trend_confluence == -1
+            and setup.trend_confluence == -1
             and 30 < rsi < 55
             and abs(float(current.close) - float(current.ema_20)) <= atr * 1.5
         )
@@ -147,10 +151,10 @@ def run_backtest(one_minute: pd.DataFrame, five_minute: pd.DataFrame | None = No
             continue
         if evaluation_mode == 'rise_fall_contract':
             contract_signals.append({
-                'signal_id': f'main-v1:{contract_symbol}:{int(decision_time)}:{trade_direction}',
+                'signal_id': f'main-v2:{contract_symbol}:{int(decision_time)}:{trade_direction}',
                 'signal_timestamp': int(decision_time),
                 'direction': trade_direction,
-                'strategy_version': 'main-v1',
+                'strategy_version': 'main-v2',
                 'symbol': contract_symbol,
                 'split': 'VALIDATION' if index >= validation_start else 'DEVELOPMENT',
             })

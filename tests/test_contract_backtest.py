@@ -158,6 +158,7 @@ class RunBacktestContractModeTests(unittest.TestCase):
             result['ema_200'] = result['close'] - 0.03 + slope
             result['atr_14'] = 0.1
             result['rsi_14'] = 60.0
+            result['trend_confluence'] = 1.0
             return result
 
         ticks = pd.DataFrame([
@@ -186,7 +187,7 @@ class RunBacktestContractModeTests(unittest.TestCase):
         self.assertEqual(first_completed['signal_timestamp'], 43_200)
         self.assertEqual(first_completed['entry_timestamp'], 43_201)
         self.assertEqual(first_completed['expiry_timestamp'], 43_261)
-        self.assertEqual(first_completed['strategy_version'], 'main-v1')
+        self.assertEqual(first_completed['strategy_version'], 'main-v2')
         self.assertEqual(first_completed['symbol'], 'stpRNG')
 
 
