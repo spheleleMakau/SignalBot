@@ -273,6 +273,69 @@ function acknowledgeExitAlert(alertId) {
   }).catch(() => {});
 }
 
+async function showSignalExplanation(url) {
+  document.getElementById('signal-explanation-modal')?.remove();
+  const overlay = document.createElement('div');
+  overlay.id = 'signal-explanation-modal';
+  overlay.className = 'explanation-modal';
+  overlay.setAttribute('role', 'dialog');
+  overlay.setAttribute('aria-modal', 'true');
+  overlay.setAttribute('aria-labelledby', 'signal-explanation-title');
+  const panel = document.createElement('section');
+  panel.className = 'explanation-panel';
+  const title = document.createElement('h2');
+  title.id = 'signal-explanation-title';
+  title.textContent = 'WHY THIS SIGNAL?';
+  const loading = document.createElement('p');
+  loading.textContent = 'Loading the recorded evidence…';
+  panel.append(title, loading);
+  overlay.append(panel);
+  overlay.addEventListener('click', event => {
+    if (event.target === overlay) overlay.remove();
+  });
+  document.body.append(overlay);
+  try {
+    const response = await fetch(url);
+    const explanation = await response.json();
+    if (!response.ok) throw new Error(explanation.detail || 'Could not load signal explanation');
+    panel.replaceChildren(title);
+    panel.append(document.createTextNode(`${explanation.status}${explanation.direction ? ` · ${explanation.direction}` : ''}`));
+    panel.append(Object.assign(document.createElement('p'), {className: 'reason', textContent: explanation.summary}));
+    const sections = [
+      ['Observed evidence', explanation.evidence],
+      ['Contradictory evidence', explanation.contradictions],
+      ['What the bot is waiting for', explanation.waiting_for],
+      ['Closed timeframe readings', (explanation.timeframes || []).map(item => `${item.timeframe}: ${item.bias}`)],
+      ['Actual indicator readings', Object.entries(explanation.indicators || {}).map(([name, value]) => `${name}: ${value}`)],
+    ];
+    sections.forEach(([heading, values]) => {
+      const section = document.createElement('section');
+      const label = document.createElement('h3');
+      label.textContent = heading;
+      const list = document.createElement('ul');
+      (values?.length ? values : ['No corresponding values were stored for this signal.']).forEach(value => {
+        const item = document.createElement('li');
+        item.textContent = String(value);
+        list.append(item);
+      });
+      section.append(label, list);
+      panel.append(section);
+    });
+    const warning = document.createElement('p');
+    warning.className = 'reason';
+    warning.textContent = explanation.risk_note;
+    panel.append(warning);
+    const close = document.createElement('button');
+    close.className = 'learning-button';
+    close.type = 'button';
+    close.textContent = 'CLOSE';
+    close.addEventListener('click', () => overlay.remove());
+    panel.append(close);
+  } catch (error) {
+    loading.textContent = error.message;
+  }
+}
+
 function showExitAlert(alert) {
   if (!alert?.id || alert.id === dismissedExitAlertId || alert.id === activeExitAlertId) return;
   activeExitAlertId = alert.id;
@@ -430,18 +493,142 @@ async function refresh() {
     const state = await (await fetch('/api/state')).json();
     if (refreshId !== latestRefreshId || (pendingMarketId && state.market_id !== pendingMarketId)) return;
     paint(state);
-    const chart = await (await fetch(`/api/chart?timeframe=${timeframe}`)).json();
+    const parameters = getHalfTrendParameters();
+    if (!parameters) {
+      $('halftrend-status').textContent = 'INVALID PARAMETERS · CHECK INPUTS';
+      return;
+    }
+    const query = new URLSearchParams({timeframe, ...parameters});
+    const response = await fetch(`/api/chart?${query}`);
+    const chart = await response.json();
+    if (!response.ok) throw new Error(chart.detail || 'Chart data unavailable');
     if (refreshId !== latestRefreshId || selectedTimeframe !== timeframe) return;
     if (chart.timeframe !== timeframe) return;
     if (state.market_id && (chart.market_id !== state.market_id || chart.symbol !== state.symbol)) return;
     Plotly.react('chart', chart.data, chart.layout, {responsive: true, displayModeBar: true, displaylogo: false, modeBarButtonsToRemove: ['lasso2d', 'select2d']});
     Plotly.Plots.resize('chart');
+    renderHalfTrend(chart.halftrend);
   } catch (error) {
     if (refreshId === latestRefreshId) $('connection').textContent = '* OFFLINE';
   }
 }
 
+function addHalfTrendPanel() {
+  if ($('halftrend-panel')) return;
+  const style = document.createElement('style');
+  style.textContent = '.halftrend-attribution{color:#8496a1;font-size:12px;line-height:1.6}.halftrend-attribution a{color:#75e6a2}.halftrend-controls{display:grid;grid-template-columns:repeat(3,minmax(130px,1fr));gap:12px;max-width:760px;margin:14px 0 18px}.halftrend-controls label{margin:0;font:500 9px DM Mono,monospace;color:#8496a1;letter-spacing:.7px}.halftrend-controls input{font-size:12px}.halftrend-metrics{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}.halftrend-metrics div{min-width:0;background:#0c151c;padding:12px}.halftrend-metrics span{display:block;color:#8496a1;font:500 9px DM Mono,monospace;line-height:1.5;margin-bottom:7px}.halftrend-metrics b{display:block;color:#e9f0f3;font:500 12px DM Mono,monospace;overflow-wrap:anywhere}.halftrend-backtest-heading{margin:22px 0 12px}.halftrend-backtest{margin-bottom:14px}.halftrend-panel small{margin:8px 0}@media(max-width:800px){.halftrend-controls{grid-template-columns:1fr 1fr}.halftrend-metrics{grid-template-columns:1fr 1fr}}@media(max-width:440px){.halftrend-controls,.halftrend-metrics{grid-template-columns:1fr}}';
+  document.head.append(style);
+  const panel = document.createElement('section');
+  panel.id = 'halftrend-panel';
+  panel.className = 'history halftrend-panel';
+  panel.innerHTML = `
+    <div class="panel-heading">
+      <span class="label">HALFTREND LONG/SHORT ENGINE · DERIV CANDLES</span>
+      <span id="halftrend-status" class="muted">WAITING FOR LIVE DERIV DATA</span>
+    </div>
+    <p class="halftrend-attribution">
+      Faithful non-commercial adaptation of
+      <a href="https://www.tradingview.com/script/ZHGPnlAz-HalfTrend-Long-Short-Signal-Engine-BigBeluga/" target="_blank" rel="noreferrer">BigBeluga's published indicator</a>;
+      original HalfTrend logic credited to everget. CC BY-NC-SA 4.0.
+    </p>
+    <div class="halftrend-controls">
+      <label>AMPLITUDE <input id="halftrend-amplitude" type="number" min="1" max="1000" step="1" value="20"></label>
+      <label>CHANNEL DEVIATION <input id="halftrend-deviation" type="number" min="0.1" step="0.1" value="2"></label>
+      <label>BASE RISK MULTIPLIER <input id="halftrend-risk" type="number" min="0.1" step="0.1" value="3"></label>
+    </div>
+    <div class="halftrend-metrics">
+      <div><span>SIGNAL STATE · ANALYTICAL ONLY</span><b id="halftrend-signal">WAIT</b></div>
+      <div><span>CURRENT TREND</span><b id="halftrend-trend">--</b></div>
+      <div><span>LAST CONFIRMED SIGNAL</span><b id="halftrend-last-signal">--</b></div>
+      <div><span>REFERENCE PRICE · SIGNAL CLOSE</span><b id="halftrend-reference">--</b></div>
+      <div><span>INVALIDATION LEVEL</span><b id="halftrend-invalidation">--</b></div>
+      <div><span>TP1 · 1R</span><b id="halftrend-tp1">--</b></div>
+      <div><span>TP2 · 2R</span><b id="halftrend-tp2">--</b></div>
+      <div><span>TP3 · 3R</span><b id="halftrend-tp3">--</b></div>
+      <div><span>ATR(100) / 2</span><b id="halftrend-atr">--</b></div>
+      <div><span>HALFTREND LINE</span><b id="halftrend-line">--</b></div>
+      <div><span>CHANNEL BANDS · HIGH / LOW</span><b id="halftrend-bands">--</b></div>
+      <div><span>DERIV FEED FRESHNESS</span><b id="halftrend-freshness">--</b></div>
+    </div>
+    <div class="panel-heading halftrend-backtest-heading">
+      <span class="label">CLOSED-CANDLE HALF-TREND BACKTEST</span>
+      <span class="muted">Chronological · no look-ahead</span>
+    </div>
+    <div class="halftrend-metrics halftrend-backtest">
+      <div><span>TRADES</span><b id="halftrend-trades">0</b></div>
+      <div><span>WINS</span><b id="halftrend-wins">0</b></div>
+      <div><span>LOSSES</span><b id="halftrend-losses">0</b></div>
+      <div><span>UNRESOLVED</span><b id="halftrend-unresolved">0</b></div>
+      <div><span>NET RESULT</span><b id="halftrend-net">0.00 R</b></div>
+      <div><span>MAX DRAWDOWN</span><b id="halftrend-drawdown">0.00 R</b></div>
+    </div>
+    <p id="halftrend-source" class="reason">Waiting for verified Deriv Step Index candles.</p>
+    <small id="halftrend-costs"></small>
+    <small>No orders are placed. Signals and historical outcomes are analytical, not a forecast or a payout guarantee.</small>`;
+  document.querySelector('.content-grid')?.after(panel);
+  panel.querySelectorAll('input').forEach(input => {
+    input.addEventListener('change', refresh);
+    input.addEventListener('keydown', event => {
+      if (event.key === 'Enter') refresh();
+    });
+  });
+}
+
+function getHalfTrendParameters() {
+  const amplitude = Number($('halftrend-amplitude')?.value);
+  const channelDeviation = Number($('halftrend-deviation')?.value);
+  const baseRisk = Number($('halftrend-risk')?.value);
+  if (
+    !Number.isInteger(amplitude) || amplitude < 1 || amplitude > 1000
+    || !Number.isFinite(channelDeviation) || channelDeviation < 0.1
+    || !Number.isFinite(baseRisk) || baseRisk <= 0
+  ) return null;
+  return {
+    amplitude: String(amplitude),
+    channel_deviation: String(channelDeviation),
+    base_risk: String(baseRisk),
+  };
+}
+
+function renderHalfTrend(data) {
+  if (!data) return;
+  const signal = data.provisional_signal
+    ? `WAIT · PROVISIONAL ${data.provisional_signal} ON OPEN CANDLE`
+    : data.signal_status;
+  $('halftrend-status').textContent = `${data.status} · ${data.market_name} · ${data.symbol || 'NO SYMBOL'}`;
+  $('halftrend-signal').textContent = signal || 'WAIT';
+  $('halftrend-trend').textContent = data.trend || '--';
+  $('halftrend-last-signal').textContent = data.last_signal
+    ? `${data.last_signal.direction} · ${new Date(data.last_signal.timestamp * 1000).toLocaleString()}`
+    : '--';
+  $('halftrend-reference').textContent = data.last_signal?.reference_price == null
+    ? '--' : fmt(data.last_signal.reference_price);
+  $('halftrend-invalidation').textContent = data.invalidation_level == null
+    ? '--' : `${fmt(data.invalidation_level)} · ${data.invalidation_status}`;
+  $('halftrend-tp1').textContent = data.last_signal?.tp1 == null ? '--' : fmt(data.last_signal.tp1);
+  $('halftrend-tp2').textContent = data.last_signal?.tp2 == null ? '--' : fmt(data.last_signal.tp2);
+  $('halftrend-tp3').textContent = data.last_signal?.tp3 == null ? '--' : fmt(data.last_signal.tp3);
+  const values = data.indicator_values || {};
+  $('halftrend-atr').textContent = values.atr_half == null ? '--' : fmt(values.atr_half);
+  $('halftrend-line').textContent = values.halftrend_line == null ? '--' : fmt(values.halftrend_line);
+  $('halftrend-bands').textContent = values.band_high == null || values.band_low == null
+    ? '--' : `${fmt(values.band_high)} / ${fmt(values.band_low)}`;
+  $('halftrend-freshness').textContent = data.freshness?.status || '--';
+  const backtest = data.backtest || {};
+  $('halftrend-trades').textContent = backtest.trades ?? 0;
+  $('halftrend-wins').textContent = backtest.wins ?? 0;
+  $('halftrend-losses').textContent = backtest.losses ?? 0;
+  $('halftrend-unresolved').textContent = backtest.unresolved ?? 0;
+  $('halftrend-net').textContent = `${Number(backtest.net_result_r || 0).toFixed(2)} R`;
+  $('halftrend-drawdown').textContent = `${Number(backtest.max_drawdown_r || 0).toFixed(2)} R`;
+  $('halftrend-source').textContent = `Verified feed: ${data.symbol || 'unavailable'} · ${data.timeframe} · reference prices are candle closes. ${data.backtest?.flats || 0} flat reversal exits.`;
+  $('halftrend-costs').textContent = backtest.cost_assumptions || '';
+}
+
 document.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('why-live-signal')?.addEventListener('click', () => {
+    showSignalExplanation('/api/learning/explanation/current');
+  });
   document.querySelectorAll('.mode-btn').forEach(button => {
     button.addEventListener('click', () => {
       const mode = button.dataset.mode;
@@ -630,6 +817,14 @@ function renderHistory(history) {
       reasonList.textContent = reasons.map(plainReason).join(' · ');
       card.appendChild(reasonList);
     }
+    const explain = document.createElement('button');
+    explain.className = 'learning-button history-explain';
+    explain.type = 'button';
+    explain.textContent = 'WHY THIS SIGNAL?';
+    explain.addEventListener('click', () => {
+      showSignalExplanation(`/api/learning/explanation/${encodeURIComponent(item.id)}`);
+    });
+    card.appendChild(explain);
     list.appendChild(card);
   });
 }
@@ -719,6 +914,7 @@ addMarketSelector();
 addScalpPanel();
 addBotPanel();
 addTimeframeAnalysis();
+addHalfTrendPanel();
 addTimeframeControls();
 refresh();
 setInterval(refresh, 3000);

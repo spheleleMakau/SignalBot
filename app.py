@@ -1,4 +1,4 @@
-import asyncio, base64, hmac, json, time
+import asyncio, base64, hmac, json, time, uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,14 +14,27 @@ from config import TIMEFRAMES, settings, validate_deployment_security
 from data.database import Database
 from data.shadow import resolve_pending_shadow_candidates
 from market.candles import CandleStore
-from market.websocket import DerivFeed
+from market.websocket import DerivFeed, TICK_TIMEOUT_SECONDS
 from market.symbols import DEFAULT_MARKET, MARKET_LABELS
 from news.calendar import CALENDAR_REFRESH_SECONDS, CALENDAR_RETRY_SECONDS, TradingEconomicsCalendar
 from analysis.signal_engine import SignalEngine
 from analysis.signal_journal import SignalJournal
+from analysis.halftrend import (
+    HalfTrendConfig,
+    HalfTrendDataError,
+    backtest_halftrend,
+    calculate_halftrend,
+)
 from backtest.engine import run_backtest
 from trading.risk import estimate_trade_values
 from trading.trade_manager import TradeManager
+from learning.course import (
+    LESSONS_BY_ID,
+    build_exercise,
+    build_review,
+    explain_signal,
+    public_curriculum,
+)
 
 validate_deployment_security(settings)
 
@@ -52,6 +65,157 @@ state = {'connection': 'OFFLINE', 'last_tick': None, 'price': None, 'symbol': No
 HISTORY_LIMIT = 20
 HISTORY_DETAIL_LIMIT = 50
 HISTORY_MAX_AGE_SECONDS = 24 * 60 * 60
+LEARNING_TIMEFRAME = '1m'
+LEARNING_CANDLE_LIMIT = 2000
+HALFTREND_TICK_MAX_AGE_SECONDS = TICK_TIMEOUT_SECONDS
+
+
+def _halftrend_chart_data(frame, closed, timeframe, config, live, last_tick):
+    defaults = {
+        'indicator_name': 'HalfTrend Long/Short Signal Engine [BigBeluga] adaptation',
+        'attribution': 'BigBeluga; original HalfTrend logic credited to everget.',
+        'license': 'CC BY-NC-SA 4.0 · non-commercial use only',
+        'source_url': 'https://www.tradingview.com/script/ZHGPnlAz-HalfTrend-Long-Short-Signal-Engine-BigBeluga/',
+        'status': 'WAIT · LIVE DERIV DATA REQUIRED',
+        'symbol': state.get('symbol'),
+        'market_name': state.get('market_name', 'Market'),
+        'timeframe': timeframe,
+        'signal_status': 'WAIT',
+        'trend': 'UNAVAILABLE',
+        'last_signal': None,
+        'provisional_signal': None,
+        'invalidation_level': None,
+        'invalidation_status': 'No confirmed signal is available.',
+        'indicator_values': {},
+        'freshness': {'status': 'NO LIVE DATA', 'age_seconds': None},
+        'config': {
+            'amplitude': config.amplitude,
+            'channel_deviation': config.channel_deviation,
+            'atr_period': config.atr_period,
+            'base_risk': config.base_risk,
+        },
+        'backtest': {
+            'trades': 0,
+            'wins': 0,
+            'losses': 0,
+            'unresolved': 0,
+            'flats': 0,
+            'net_result_r': 0.0,
+            'max_drawdown_r': 0.0,
+            'active_trade': None,
+            'cost_assumptions': (
+                'Gross price movement only. Spread, slippage, commission, financing, and '
+                'contract payout are unavailable and excluded; this is not a Rise/Fall payout result.'
+            ),
+        },
+    }
+    if not live or frame.empty:
+        return defaults, [], []
+
+    full_candles = frame.to_dict('records')
+    closed_candles = closed.to_dict('records')
+    timeframe_seconds = TIMEFRAMES[timeframe]
+    try:
+        full_results = calculate_halftrend(full_candles, config, timeframe_seconds)
+        closed_results = calculate_halftrend(closed_candles, config, timeframe_seconds)
+        backtest = backtest_halftrend(closed_candles, closed_results)
+    except HalfTrendDataError as error:
+        defaults.update({
+            'status': f'DATA ERROR · {error}',
+            'error': str(error),
+        })
+        return defaults, [], []
+
+    age = int(time.time()) - int(last_tick) if last_tick is not None else None
+    fresh = age is not None and 0 <= age <= HALFTREND_TICK_MAX_AGE_SECONDS
+    last_closed = closed_results[-1] if closed_results else None
+    last_signal = next(
+        (bar for bar in reversed(closed_results) if bar['signal']),
+        None,
+    )
+    active = backtest['active_trade']
+    full_latest = full_results[-1] if full_results else None
+    is_open_candle = (
+        full_latest is not None
+        and last_tick is not None
+        and int(full_latest['timestamp']) == int(last_tick) - int(last_tick) % timeframe_seconds
+    )
+    provisional_signal = (
+        full_latest['signal']
+        if is_open_candle and full_latest['signal']
+        else None
+    )
+    if last_closed and last_closed['atr_100'] is not None:
+        status = 'READY' if fresh else 'WAIT · DERIV TICK IS STALE'
+    else:
+        status = (
+            f'WARMING UP · ATR({config.atr_period}) '
+            f'{len(closed_candles)}/{config.atr_period} CLOSED CANDLES'
+        )
+    if not fresh:
+        signal_status = 'WAIT'
+    else:
+        signal_status = active['direction'] if active else 'WAIT'
+
+    def signal_summary(bar):
+        if not bar:
+            return None
+        return {
+            'direction': bar['signal'],
+            'timestamp': bar['close_timestamp'],
+            'candle_timestamp': bar['timestamp'],
+            'reference_price': bar['entry'],
+            'invalidation_level': bar['stop_loss'],
+            'tp1': bar['tp1'],
+            'tp2': bar['tp2'],
+            'tp3': bar['tp3'],
+            'atr_100': bar['atr_100'],
+            'atr_half': bar['atr_half'],
+            'band_high': bar['band_high'],
+            'band_low': bar['band_low'],
+        }
+
+    defaults.update({
+        'status': status,
+        'signal_status': signal_status,
+        'trend': last_closed['trend'] if last_closed else 'UNAVAILABLE',
+        'last_signal': signal_summary(last_signal),
+        'provisional_signal': provisional_signal,
+        'invalidation_level': active['stop_loss'] if active else (
+            last_signal['stop_loss'] if last_signal else None
+        ),
+        'invalidation_status': (
+            'ACTIVE ANALYTICAL TRADE REFERENCE · NO ORDER PLACED'
+            if active else
+            'LAST SIGNAL REFERENCE ONLY · NOT AN ACTIVE TRADE'
+            if last_signal else
+            'No confirmed signal is available.'
+        ),
+        'indicator_values': {
+            'atr_100': last_closed['atr_100'] if last_closed else None,
+            'atr_half': last_closed['atr_half'] if last_closed else None,
+            'halftrend_line': last_closed['line'] if last_closed else None,
+            'band_high': last_closed['band_high'] if last_closed else None,
+            'band_low': last_closed['band_low'] if last_closed else None,
+        },
+        'freshness': {
+            'status': f'LIVE · {age}s OLD' if fresh else 'STALE · WAIT',
+            'age_seconds': age,
+        },
+        'backtest': {
+            key: backtest[key]
+            for key in (
+                'trades', 'wins', 'losses', 'unresolved', 'flats',
+                'net_result_r', 'max_drawdown_r', 'cost_assumptions',
+            )
+        },
+    })
+    if active:
+        defaults['backtest']['active_trade'] = {
+            key: active[key]
+            for key in ('direction', 'timestamp', 'entry', 'stop_loss', 'tp1', 'tp2', 'tp3')
+        }
+    return defaults, full_results, closed_results
 
 
 def detect_mode(request: Request | None = None):
@@ -339,7 +503,11 @@ app.mount('/static', StaticFiles(directory=BASE_DIR / 'dashboard' / 'static'), n
 @app.middleware('http')
 async def disable_static_cache(request, call_next):
     response = await call_next(request)
-    if request.url.path == '/static/app.js':
+    if request.url.path in {
+        '/static/app.js',
+        '/static/learning.js',
+        '/static/learning.css',
+    }:
         response.headers['Cache-Control'] = 'no-store'
     return response
 
@@ -364,6 +532,150 @@ async def index(request: Request):
     symbol_label = 'AVIATOR' if mode == 'aviator' else (state.get('symbol') or 'WAITING FOR LIVE SYMBOL')
     template_name = 'aviator.html' if mode == 'aviator' else 'index.html'
     return templates.TemplateResponse(template_name, {'request': request, 'symbol': symbol_label, 'app_mode': mode, 'page_title': title})
+
+
+@app.get('/learn', response_class=HTMLResponse)
+async def learning_page(request: Request):
+    return templates.TemplateResponse(
+        'learn.html',
+        {
+            'request': request,
+            'symbol': state.get('symbol') or 'Step Index',
+            'page_title': 'Learn Practically · SignalBot',
+        },
+    )
+
+
+@app.get('/api/learning')
+async def learning_course():
+    curriculum = public_curriculum(database.learning_progress())
+    curriculum.update({
+        'symbol': state.get('symbol'),
+        'market_id': state.get('market_id'),
+        'historical_candle_source': 'SQLite closed 1-minute candles',
+        'raw_tick_history_available': False,
+    })
+    return curriculum
+
+
+@app.get('/api/learning/explanation/current')
+async def current_signal_explanation():
+    signal = dict(state.get('signal') or {})
+    signal['timeframes'] = signal.get('timeframes') or state.get('timeframes') or {}
+    return explain_signal(signal)
+
+
+@app.get('/api/learning/explanation/{signal_id}')
+async def historical_signal_explanation(signal_id: str):
+    signal = database.get_signal(signal_id)
+    if not signal:
+        raise HTTPException(status_code=404, detail='Signal snapshot is no longer available')
+    signal['reasons'] = signal.get('reason') or []
+    if isinstance(signal['reasons'], str):
+        try:
+            signal['reasons'] = json.loads(signal['reasons'])
+        except json.JSONDecodeError:
+            signal['reasons'] = [signal['reasons']]
+    return explain_signal(signal)
+
+
+class LearningExerciseRequest(BaseModel):
+    lesson_id: str
+
+
+class LearningAnswerRequest(BaseModel):
+    attempt_id: str
+    decision: Literal['LONG', 'SHORT', 'WAIT']
+
+
+@app.post('/api/learning/attempt')
+async def start_learning_attempt(exercise_request: LearningExerciseRequest):
+    if exercise_request.lesson_id not in LESSONS_BY_ID:
+        raise HTTPException(status_code=422, detail='Unknown lesson')
+    if state.get('market_id') != 'step_index':
+        raise HTTPException(status_code=409, detail='Select Step Index before starting a course exercise')
+    symbol = state.get('symbol')
+    if not symbol:
+        raise HTTPException(status_code=503, detail='Step Index market symbol is not available')
+
+    candles = database.learning_candles(symbol, LEARNING_TIMEFRAME, LEARNING_CANDLE_LIMIT)
+    now = int(time.time())
+    closed = [candle for candle in candles if int(candle['timestamp']) + 60 <= now]
+    exercise = build_exercise(
+        exercise_request.lesson_id,
+        closed,
+        database.learning_attempt_count(exercise_request.lesson_id) + 1,
+        symbol,
+        context_candles={
+            timeframe: database.learning_candles(symbol, timeframe, LEARNING_CANDLE_LIMIT)
+            for timeframe in ('5m', '15m', '1h', '4h')
+        },
+    )
+    if exercise is None:
+        raise HTTPException(
+            status_code=503,
+            detail='Not enough saved, closed 1-minute candles for a historical exercise yet',
+        )
+    attempt_id = str(uuid.uuid4())
+    database.create_learning_attempt(
+        attempt_id,
+        exercise_request.lesson_id,
+        symbol,
+        int(exercise['decision_timestamp']),
+        exercise,
+        now,
+    )
+    return {'attempt_id': attempt_id, **exercise}
+
+
+@app.get('/api/learning/attempt/{attempt_id}')
+async def get_learning_attempt(attempt_id: str):
+    attempt = database.learning_attempt(attempt_id)
+    if not attempt:
+        raise HTTPException(status_code=404, detail='Learning attempt not found')
+    if attempt['review']:
+        return {'attempt_id': attempt_id, 'snapshot': attempt['snapshot'], 'review': attempt['review']}
+    return {'attempt_id': attempt_id, **attempt['snapshot']}
+
+
+@app.post('/api/learning/answer')
+async def submit_learning_answer(answer: LearningAnswerRequest):
+    attempt = database.learning_attempt(answer.attempt_id)
+    if not attempt:
+        raise HTTPException(status_code=404, detail='Learning attempt not found')
+    if attempt['review']:
+        if attempt['decision'] != answer.decision:
+            raise HTTPException(status_code=409, detail='This exercise was already reviewed with a different choice')
+        return {'attempt_id': answer.attempt_id, 'review': attempt['review']}
+
+    exercise = attempt['snapshot']
+    candles = database.learning_candles(attempt['symbol'], LEARNING_TIMEFRAME, LEARNING_CANDLE_LIMIT)
+    future = [
+        {
+            'timestamp': int(candle['timestamp']),
+            'open': float(candle['open']),
+            'high': float(candle['high']),
+            'low': float(candle['low']),
+            'close': float(candle['close']),
+        }
+        for candle in candles
+        if int(candle['timestamp']) >= int(attempt['decision_timestamp'])
+        and int(candle['timestamp']) + 60 <= int(time.time())
+    ][:10]
+    review = build_review(exercise, answer.decision, future)
+    if not database.complete_learning_attempt(
+        answer.attempt_id,
+        answer.decision,
+        review,
+        int(time.time()),
+    ):
+        attempt = database.learning_attempt(answer.attempt_id)
+        if not attempt or not attempt['review']:
+            raise HTTPException(status_code=409, detail='Exercise was already submitted')
+        if attempt['decision'] != answer.decision:
+            raise HTTPException(status_code=409, detail='This exercise was already reviewed with a different choice')
+        review = attempt['review']
+    return {'attempt_id': answer.attempt_id, 'review': review}
 
 
 class TradingViewWebhookAlert(BaseModel):
@@ -566,7 +878,20 @@ def build_timeframe_analysis(market_store, last_tick, feed_is_fresh):
     return analysis
 
 @app.get('/api/chart')
-async def api_chart(timeframe: str = '5m'):
+async def api_chart(
+    timeframe: str = '5m',
+    amplitude: int = 20,
+    channel_deviation: float = 2.0,
+    base_risk: float = 3.0,
+):
+    try:
+        halftrend_config = HalfTrendConfig(
+            amplitude=amplitude,
+            channel_deviation=channel_deviation,
+            base_risk=base_risk,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
     if timeframe not in store.frames:
         timeframe = '5m'
     timeframe_label = {'1m': '1 MINUTE', '5m': '5 MINUTES', '15m': '15 MINUTES', '1h': '1 HOUR', '4h': '4 HOURS'}[timeframe]
@@ -578,8 +903,17 @@ async def api_chart(timeframe: str = '5m'):
     }
     frame = store.dataframe(timeframe)
     if state.get('connection') != 'LIVE' or frame.empty:
+        halftrend_data, _, _ = _halftrend_chart_data(
+            frame,
+            frame.iloc[:0],
+            timeframe,
+            halftrend_config,
+            False,
+            state.get('last_tick'),
+        )
         return {
             **chart_context,
+            'halftrend': halftrend_data,
             'data': [],
             'layout': {
                 'template': 'plotly_dark',
@@ -602,6 +936,101 @@ async def api_chart(timeframe: str = '5m'):
         active_bucket = int(last_tick) - int(last_tick) % TIMEFRAMES[timeframe]
         if int(closed.timestamp.iloc[-1]) == active_bucket:
             closed = closed.iloc[:-1].reset_index(drop=True)
+    halftrend_data, halftrend_all, halftrend_closed = _halftrend_chart_data(
+        frame,
+        closed,
+        timeframe,
+        halftrend_config,
+        True,
+        last_tick,
+    )
+    if halftrend_all:
+        chart.add_trace(go.Scatter(
+            x=[bar['timestamp'] for bar in halftrend_all],
+            y=[bar['line'] for bar in halftrend_all],
+            name='HalfTrend · BigBeluga adaptation',
+            line={'color': '#75e6a2', 'width': 2.4, 'shape': 'hv'},
+            connectgaps=False,
+        ))
+        for key, label, color in (
+            ('band_high', 'HalfTrend upper band', '#ff6b6b'),
+            ('band_low', 'HalfTrend lower band', '#66c7f2'),
+        ):
+            chart.add_trace(go.Scatter(
+                x=[bar['timestamp'] for bar in halftrend_all],
+                y=[bar[key] for bar in halftrend_all],
+                name=label,
+                line={'color': color, 'width': 1, 'dash': 'dot'},
+                connectgaps=False,
+            ))
+
+    confirmed_signals = [bar for bar in halftrend_closed if bar['signal']]
+    for direction, marker_symbol, color in (
+        ('LONG', 'triangle-up', '#75e6a2'),
+        ('SHORT', 'triangle-down', '#ff6b6b'),
+    ):
+        markers = [bar for bar in confirmed_signals if bar['signal'] == direction]
+        if markers:
+            prices = closed.set_index('timestamp')
+            y_values = [
+                float(prices.loc[bar['timestamp'], 'low' if direction == 'LONG' else 'high'])
+                for bar in markers
+            ]
+            chart.add_trace(go.Scatter(
+                x=[bar['timestamp'] for bar in markers],
+                y=y_values,
+                mode='markers',
+                name=f'HalfTrend {direction} · confirmed close',
+                marker={
+                    'symbol': marker_symbol,
+                    'size': 13,
+                    'color': color,
+                    'line': {'width': 1, 'color': '#0b1117'},
+                },
+                text=[
+                    (
+                        f"Confirmed {direction} · close {bar['close_timestamp']} · "
+                        f"reference {bar['entry']:.2f} · invalidation "
+                        f"{bar['stop_loss']:.2f}" if bar['stop_loss'] is not None else
+                        f"Confirmed {direction} · close {bar['close_timestamp']} · "
+                        f"reference {bar['entry']:.2f} · ATR(100) warming up"
+                    )
+                    for bar in markers
+                ],
+                hovertemplate='%{text}<extra></extra>',
+            ))
+
+    if halftrend_data['provisional_signal'] and halftrend_all:
+        forming_bar = halftrend_all[-1]
+        chart.add_trace(go.Scatter(
+            x=[forming_bar['timestamp']],
+            y=[float(frame.iloc[-1].low if halftrend_data['provisional_signal'] == 'LONG' else frame.iloc[-1].high)],
+            mode='markers',
+            name=f"HalfTrend {halftrend_data['provisional_signal']} · provisional",
+            marker={'symbol': 'circle-open', 'size': 12, 'color': '#f6c85f', 'line': {'width': 2}},
+            text=[f"Provisional {halftrend_data['provisional_signal']} · open candle; not confirmed"],
+            hovertemplate='%{text}<extra></extra>',
+        ))
+
+    active_trade = halftrend_data['backtest'].get('active_trade')
+    if active_trade:
+        for key, color, label in (
+            ('entry', '#e9f0f3', 'HalfTrend reference entry'),
+            ('stop_loss', '#ff6b6b', 'HalfTrend invalidation'),
+            ('tp1', '#75e6a2', 'HalfTrend TP1'),
+            ('tp2', '#75e6a2', 'HalfTrend TP2'),
+            ('tp3', '#75e6a2', 'HalfTrend TP3'),
+        ):
+            chart.add_hline(
+                y=active_trade[key],
+                line_color=color,
+                line_dash='dash' if key == 'stop_loss' else 'solid',
+                line_width=1.5,
+                annotation_text=f'{label} · {active_trade[key]:.2f}',
+                annotation_position='right',
+                annotation_font_color=color,
+                annotation_bgcolor='rgba(11,17,23,.85)',
+            )
     structure = market_structure(closed)
     swing_line_specs = (
         (structure.get('swing_lows', []), 'low', 'swing support', '#75e6a2'),
@@ -711,7 +1140,7 @@ async def api_chart(timeframe: str = '5m'):
     action = state.get('timeframe_analysis', {}).get(timeframe, {}).get('action', 'WAIT')
     bias_label = {'BUY': 'UP BIAS', 'SELL': 'DOWN BIAS', 'WAIT': 'WAIT'}[action]
     chart.update_layout(template='plotly_dark', height=520, margin={'l':20,'r':20,'t':54,'b':34}, title={'text': f"{chart_context['market_name']} · {timeframe_label} · {bias_label} · BIAS ONLY, NOT AN ENTRY", 'x': .02, 'xanchor': 'left', 'font': {'size': 16}}, legend={'orientation': 'h', 'y': 1.02, 'x': 0}, hovermode='x unified', xaxis={'fixedrange': False}, yaxis={'fixedrange': False}, xaxis_rangeslider_visible=False, uirevision=f"{chart_context['market_id']}:{chart_context['symbol']}:{timeframe}")
-    return {**chart_context, **json.loads(chart.to_json())}
+    return {**chart_context, 'halftrend': halftrend_data, **json.loads(chart.to_json())}
 
 class ExitAlertAcknowledgement(BaseModel): id: str
 

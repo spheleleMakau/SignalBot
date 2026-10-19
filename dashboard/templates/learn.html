@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ page_title }}</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/responsive.css">
+  <link rel="stylesheet" href="/static/learning.css">
+  <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+</head>
+<body class="learning-page">
+  <header>
+    <div>
+      <span class="eyebrow">SIGNALBOT / PRACTICAL LEARNING</span>
+      <h1>Learn Practically <span>{{ symbol }}</span></h1>
+    </div>
+    <div class="header-tools">
+      <a class="learn-link" href="/">BACK TO DASHBOARD</a>
+      <div id="course-progress" class="connection">0 / 8 LESSONS</div>
+    </div>
+  </header>
+  <main class="learning-main">
+    <section class="learning-intro">
+      <span class="label">CHART READING · BOT RULES · DECISION REVIEW</span>
+      <h2>Make a choice from the chart evidence. See what followed only after you answer.</h2>
+      <p id="course-policy" class="reason">Loading course details…</p>
+    </section>
+    <section class="learning-layout">
+      <aside class="learning-lessons">
+        <div class="panel-heading"><span class="label">SHORT LESSONS</span></div>
+        <nav id="lesson-list" aria-label="Course lessons"></nav>
+      </aside>
+      <article class="learning-workspace">
+        <div id="lesson-content">
+          <div class="panel-heading"><span class="label">CHOOSE A LESSON</span></div>
+          <p class="reason">Lessons use saved historical Step Index candles. They do not place trades or promise outcomes.</p>
+        </div>
+      </article>
+    </section>
+    <section class="glossary-panel">
+      <div class="panel-heading"><span class="label">SEARCHABLE GLOSSARY</span></div>
+      <label for="glossary-search">Find a term</label>
+      <input id="glossary-search" type="search" placeholder="Search EMA, retest, expiry…">
+      <div id="glossary-results" class="glossary-results"></div>
+    </section>
+    <p id="learning-message" class="learning-message" role="status"></p>
+  </main>
+  <script src="/static/learning.js"></script>
+</body>
+</html>

@@ -50,6 +50,22 @@ class Database:
             );
             CREATE INDEX IF NOT EXISTS idx_shadow_symbol_outcome
                 ON shadow_candidates(symbol, outcome, evaluated_at);
+            CREATE TABLE IF NOT EXISTS learning_attempts (
+                attempt_id TEXT PRIMARY KEY,
+                lesson_id TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                decision_timestamp INTEGER NOT NULL,
+                snapshot TEXT NOT NULL,
+                decision TEXT,
+                review TEXT,
+                created_at INTEGER NOT NULL,
+                reviewed_at INTEGER
+            );
+            CREATE TABLE IF NOT EXISTS learning_progress (
+                lesson_id TEXT PRIMARY KEY,
+                completion_count INTEGER NOT NULL DEFAULT 0,
+                last_completed_at INTEGER NOT NULL
+            );
             ''')
 
     def save_candles(self, symbol: str, timeframe: str, candles: list[dict[str, Any]]):
@@ -70,6 +86,96 @@ class Database:
                 query = 'SELECT * FROM signals WHERE entry IS NOT NULL AND direction IS NOT NULL AND timestamp >= ? ORDER BY timestamp DESC LIMIT ?'
                 params = (since, limit)
             return [dict(row) for row in db.execute(query, params).fetchall()]
+
+    def get_signal(self, signal_id: str):
+        with closing(self.connect()) as db, db:
+            row = db.execute('SELECT * FROM signals WHERE id = ?', (signal_id,)).fetchone()
+            return dict(row) if row else None
+
+    def learning_candles(self, symbol: str, timeframe: str, limit: int = 2000):
+        with closing(self.connect()) as db, db:
+            rows = db.execute(
+                '''
+                SELECT timestamp, open, high, low, close, volume
+                FROM candles
+                WHERE symbol = ? AND timeframe = ?
+                ORDER BY timestamp DESC
+                LIMIT ?
+                ''',
+                (symbol, timeframe, limit),
+            ).fetchall()
+            return [dict(row) for row in reversed(rows)]
+
+    def learning_attempt_count(self, lesson_id: str) -> int:
+        with closing(self.connect()) as db, db:
+            row = db.execute(
+                'SELECT COUNT(*) AS attempts FROM learning_attempts WHERE lesson_id = ?',
+                (lesson_id,),
+            ).fetchone()
+            return int(row['attempts'])
+
+    def create_learning_attempt(self, attempt_id: str, lesson_id: str, symbol: str, decision_timestamp: int, snapshot: dict[str, Any], created_at: int):
+        with closing(self.connect()) as db, db:
+            db.execute(
+                '''
+                INSERT INTO learning_attempts (
+                    attempt_id, lesson_id, symbol, decision_timestamp,
+                    snapshot, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ''',
+                (
+                    attempt_id, lesson_id, symbol, decision_timestamp,
+                    json.dumps(snapshot), created_at,
+                ),
+            )
+
+    def learning_attempt(self, attempt_id: str):
+        with closing(self.connect()) as db, db:
+            row = db.execute(
+                'SELECT * FROM learning_attempts WHERE attempt_id = ?',
+                (attempt_id,),
+            ).fetchone()
+            if not row:
+                return None
+            result = dict(row)
+            result['snapshot'] = json.loads(result['snapshot'])
+            result['review'] = json.loads(result['review']) if result['review'] else None
+            return result
+
+    def complete_learning_attempt(self, attempt_id: str, decision: str, review: dict[str, Any], reviewed_at: int) -> bool:
+        with closing(self.connect()) as db, db:
+            cursor = db.execute(
+                '''
+                UPDATE learning_attempts
+                SET decision = ?, review = ?, reviewed_at = ?
+                WHERE attempt_id = ? AND decision IS NULL
+                ''',
+                (decision, json.dumps(review), reviewed_at, attempt_id),
+            )
+            if cursor.rowcount != 1:
+                return False
+            lesson_id = db.execute(
+                'SELECT lesson_id FROM learning_attempts WHERE attempt_id = ?',
+                (attempt_id,),
+            ).fetchone()['lesson_id']
+            db.execute(
+                '''
+                INSERT INTO learning_progress (lesson_id, completion_count, last_completed_at)
+                VALUES (?, 1, ?)
+                ON CONFLICT(lesson_id) DO UPDATE SET
+                    completion_count = learning_progress.completion_count + 1,
+                    last_completed_at = excluded.last_completed_at
+                ''',
+                (lesson_id, reviewed_at),
+            )
+            return True
+
+    def learning_progress(self):
+        with closing(self.connect()) as db, db:
+            rows = db.execute(
+                'SELECT lesson_id, completion_count, last_completed_at FROM learning_progress'
+            ).fetchall()
+            return {row['lesson_id']: dict(row) for row in rows}
 
     def record_shadow_candidate(
         self,

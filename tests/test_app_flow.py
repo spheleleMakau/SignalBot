@@ -4,8 +4,10 @@ import unittest
 from unittest.mock import patch
 
 import app
+import pandas as pd
 from market.candles import CandleStore
 from trading.trade_manager import TradeManager
+from analysis.halftrend import HalfTrendConfig
 
 
 class AppFlowTests(unittest.TestCase):
@@ -135,6 +137,9 @@ class AppFlowTests(unittest.TestCase):
         self.assertIn('Short trend line (20 candles)', trace_names)
         self.assertIn('BUY candle patterns', trace_names)
         self.assertIn('Resolved backtest entries', trace_names)
+        self.assertIn('HalfTrend · BigBeluga adaptation', trace_names)
+        self.assertIn('HalfTrend upper band', trace_names)
+        self.assertIn('HalfTrend lower band', trace_names)
         self.assertTrue(any('swing' in name.lower() for name in trace_names))
         shape_types = [shape['type'] for shape in chart['layout']['shapes']]
         self.assertIn('rect', shape_types)
@@ -142,6 +147,10 @@ class AppFlowTests(unittest.TestCase):
         self.assertEqual(chart['market_id'], 'step_index')
         self.assertEqual(chart['symbol'], 'stpRNG')
         self.assertEqual(chart['timeframe'], '1m')
+        self.assertEqual(chart['halftrend']['config']['amplitude'], 20)
+        self.assertEqual(chart['halftrend']['config']['channel_deviation'], 2.0)
+        self.assertIn('CC BY-NC-SA 4.0', chart['halftrend']['license'])
+        self.assertIn('atr_100', chart['halftrend']['indicator_values'])
         self.assertIn('Step Index · 1 MINUTE', chart['layout']['title']['text'])
         annotations = [annotation.get('text', '') for annotation in chart['layout']['annotations']]
         self.assertTrue(any('ENTRY · 101.00' in label for label in annotations))
@@ -172,6 +181,58 @@ class AppFlowTests(unittest.TestCase):
                 self.assertEqual(chart['symbol'], 'frxXAUUSD')
                 self.assertEqual(chart['timeframe'], timeframe)
                 self.assertIn('Gold · ', chart['layout']['title'])
+                self.assertEqual(chart['halftrend']['signal_status'], 'WAIT')
+                self.assertEqual(chart['halftrend']['freshness']['status'], 'NO LIVE DATA')
+
+    def test_halftrend_provisional_flip_is_not_a_confirmed_signal(self):
+        closes = (
+            list(range(10, 21))
+            + list(range(19, 9, -1))
+            + list(range(11, 22))
+        )
+        candles = [
+            {
+                'timestamp': index * 60,
+                'open': float(close),
+                'high': float(close) + 0.5,
+                'low': float(close) - 0.5,
+                'close': float(close),
+            }
+            for index, close in enumerate(closes)
+        ]
+        forming = {
+            'timestamp': len(candles) * 60,
+            'open': 10.0,
+            'high': 10.2,
+            'low': 8.0,
+            'close': 9.0,
+        }
+        frame = pd.DataFrame(candles + [forming])
+        closed = pd.DataFrame(candles)
+
+        with patch.dict(app.state, {
+            'symbol': 'stpRNG',
+            'market_name': 'Step Index',
+        }):
+            result, _, confirmed = app._halftrend_chart_data(
+                frame,
+                closed,
+                '1m',
+                HalfTrendConfig(amplitude=3, atr_period=3),
+                True,
+                forming['timestamp'],
+            )
+
+        self.assertIsNone(confirmed[-1]['signal'])
+        self.assertEqual(result['provisional_signal'], 'SHORT')
+        self.assertEqual(result['signal_status'], 'WAIT')
+        self.assertEqual(result['freshness']['status'], 'STALE · WAIT')
+
+    def test_halftrend_chart_rejects_invalid_parameters(self):
+        with self.assertRaises(app.HTTPException) as error:
+            asyncio.run(app.api_chart(timeframe='1m', amplitude=0))
+
+        self.assertEqual(error.exception.status_code, 422)
 
     def test_backtest_gate_requires_enough_profitable_closed_trades(self):
         self.assertEqual(
