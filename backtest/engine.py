@@ -4,15 +4,42 @@ from analysis.indicators import indicators
 from analysis.candle_patterns import breakout_confirmation, candle_confirmation
 from analysis.structure import market_structure
 from analysis.support_resistance import levels
+from .contracts import evaluate_rise_fall_signals
 
 def run_backtest(one_minute: pd.DataFrame, five_minute: pd.DataFrame | None = None,
                  fifteen_minute: pd.DataFrame | None = None, one_hour: pd.DataFrame | None = None,
                  minimum_score: int = 75, validation_fraction: float = 0.3,
-                 holding_bars: int = 120, four_hour: pd.DataFrame | None = None):
+                 holding_bars: int = 120, four_hour: pd.DataFrame | None = None,
+                 evaluation_mode: str = 'stop_target', contract_ticks: pd.DataFrame | None = None,
+                 contract_duration_seconds: int = 60, max_contract_entry_delay_seconds: int = 5,
+                 contract_symbol: str | None = None):
+    if evaluation_mode not in {'stop_target', 'rise_fall_contract'}:
+        raise ValueError(f'Unsupported backtest evaluation mode: {evaluation_mode}')
+    if evaluation_mode == 'rise_fall_contract' and (
+        not isinstance(contract_symbol, str) or not contract_symbol.strip()
+    ):
+        raise ValueError('Contract evaluation requires the exact instrument symbol')
     frames = (one_minute, five_minute, fifteen_minute, one_hour, four_hour)
     minimums = (220, 30, 30, 30, 30)
     if any(frame is None or len(frame) < minimum for frame, minimum in zip(frames, minimums)):
         return {'status': 'INSUFFICIENT HISTORICAL DATA', 'trades': 0}
+    if evaluation_mode == 'rise_fall_contract' and contract_ticks is None:
+        return {
+            'status': 'INSUFFICIENT TICK DATA',
+            'evaluation_mode': 'RISE_FALL_CONTRACT',
+            'trades': 0,
+            'incomplete': 0,
+        }
+    if (
+        evaluation_mode == 'rise_fall_contract'
+        and not contract_ticks.empty
+        and 'symbol' in contract_ticks
+        and (
+            contract_ticks['symbol'].isna().any()
+            or set(contract_ticks['symbol']) != {contract_symbol}
+        )
+    ):
+        raise ValueError('Contract tick symbols must all match the requested instrument')
 
     minute, five, fifteen, hour, four = (
         indicators(frame).reset_index(drop=True) for frame in frames
@@ -28,6 +55,7 @@ def run_backtest(one_minute: pd.DataFrame, five_minute: pd.DataFrame | None = No
     outcomes = []
     validation_outcomes = []
     trade_markers = []
+    contract_signals = []
     ambiguous = 0
     last_exit_index = -1
 
@@ -115,7 +143,17 @@ def run_backtest(one_minute: pd.DataFrame, five_minute: pd.DataFrame | None = No
         target_1 = targets[0] if targets else entry + unit_risk * 2 * direction
         target_2 = targets[1] if len(targets) > 1 else entry + unit_risk * 3 * direction
         reward_risk = abs(target_1 - entry) / unit_risk if unit_risk else 0
-        if reward_risk < 2:
+        if evaluation_mode == 'stop_target' and reward_risk < 2:
+            continue
+        if evaluation_mode == 'rise_fall_contract':
+            contract_signals.append({
+                'signal_id': f'main-v1:{contract_symbol}:{int(decision_time)}:{trade_direction}',
+                'signal_timestamp': int(decision_time),
+                'direction': trade_direction,
+                'strategy_version': 'main-v1',
+                'symbol': contract_symbol,
+                'split': 'VALIDATION' if index >= validation_start else 'DEVELOPMENT',
+            })
             continue
 
         future = minute.iloc[index + 1: min(index + holding_bars + 1, len(minute))]
@@ -137,6 +175,15 @@ def run_backtest(one_minute: pd.DataFrame, five_minute: pd.DataFrame | None = No
         if index >= validation_start:
             validation_outcomes.append(outcome)
         ambiguous += int(was_ambiguous)
+
+    if evaluation_mode == 'rise_fall_contract':
+        return evaluate_rise_fall_signals(
+            contract_signals,
+            contract_ticks,
+            duration_seconds=contract_duration_seconds,
+            max_entry_delay_seconds=max_contract_entry_delay_seconds,
+            symbol=contract_symbol,
+        )
 
     wins = [result for result in outcomes if result > 0]
     losses = [result for result in outcomes if result < 0]

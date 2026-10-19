@@ -48,6 +48,12 @@ The technical checks combine multi-timeframe trend/structure, EMA alignment, RSI
 
 Trade plans use a fixed 0.10 lot size and show the estimated stop and target outcomes. These are alerts, not automatic trades or guarantees; independently assess the risk and verify the stop before taking any position. The public Deriv `active_symbols` response provides `pip_size`, not the account-specific USD value per price unit per lot. Set `USD_PER_PRICE_UNIT_PER_LOT` only from the contract specification for the exact broker and instrument; leave it blank to avoid guessed dollar figures. Stop/target alerts remain on screen until acknowledged and speak “Close order now” when browser speech is available.
 
+### One-minute Rise/Fall contract evaluation
+
+`backtest.engine.run_backtest` retains its existing stop/target evaluation by default. Its separate `evaluation_mode='rise_fall_contract'` mode uses the same closed-candle signal rules but requires an explicit `contract_symbol` and a separate `contract_ticks` series of observed `{timestamp, quote}` (or `{epoch, quote}`) records. If a symbol column is supplied, every tick must match that instrument. It records the signal availability time at the completed 1-minute candle close, enters only on the first quote with a later timestamp (within the default 5-second entry-delay limit), and calculates expiry from that observed entry timestamp plus `contract_duration_seconds` (default 60). It resolves a result only when a quote exists at that exact expiry timestamp. Missing entry or expiry quotes remain incomplete; no OHLC candle close is substituted. Duplicate identical ticks are collapsed, conflicting same-time quotes are rejected, and overlapping or duplicate signals are excluded.
+
+This evaluator reports directional outcomes only. Tie results are kept distinct, and payout, refund, spread, fees, and net expected return remain unavailable unless verified contract-specific data is supplied. The live app currently stores candles rather than a persistent historical raw-tick archive, so its existing dashboard backtest cannot produce this contract evaluation automatically. Do not pass resampled candle closes as tick quotes or use the resulting directional hit rate as profitability evidence.
+
 ## Local Setup
 
 ```powershell
